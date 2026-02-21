@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from src.parsers.paper_trader import PaperTrader
     from src.parsers.pumpportal.ws_client import PumpPortalClient
     from src.parsers.solsniffer.client import SolSnifferClient
+    from src.trading.real_trader import RealTrader
 
 
 class MetricsRegistry:
@@ -34,6 +35,7 @@ class MetricsRegistry:
     enrichment_queue: PersistentEnrichmentQueue | None = None
     alert_dispatcher: AlertDispatcher | None = None
     paper_trader: PaperTrader | None = None
+    real_trader: RealTrader | None = None
     solsniffer: SolSnifferClient | None = None
     redis: Any | None = None  # Redis[bytes]
 

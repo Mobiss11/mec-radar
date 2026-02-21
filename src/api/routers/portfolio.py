@@ -1,4 +1,4 @@
-"""Portfolio endpoints — paper trading summary, positions, PnL history."""
+"""Portfolio endpoints — paper & real trading summary, positions, PnL history."""
 
 from __future__ import annotations
 
@@ -15,16 +15,40 @@ from src.models.trade import Position, Trade
 router = APIRouter(prefix="/api/v1/portfolio", tags=["portfolio"])
 
 
+def _is_paper_filter(mode: str):
+    """Build SQLAlchemy filter for is_paper based on mode (paper/real/all)."""
+    if mode == "paper":
+        return Position.is_paper == 1
+    elif mode == "real":
+        return Position.is_paper == 0
+    # mode == "all" → no filter
+    return True
+
+
+def _is_paper_filter_trade(mode: str):
+    """Build SQLAlchemy filter for Trade.is_paper based on mode."""
+    if mode == "paper":
+        return Trade.is_paper == 1
+    elif mode == "real":
+        return Trade.is_paper == 0
+    return True
+
+
 @router.get("/summary")
 async def portfolio_summary(
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
+    mode: str = Query("paper", pattern="^(paper|real|all)$"),
 ) -> dict[str, Any]:
-    """Paper trading portfolio summary."""
-    if registry.paper_trader:
+    """Portfolio summary — paper, real, or combined."""
+    # Use trader's built-in summary for single-mode fast path
+    if mode == "paper" and registry.paper_trader:
         return await registry.paper_trader.get_portfolio_summary(session)
+    if mode == "real" and registry.real_trader:
+        return await registry.real_trader.get_portfolio_summary(session)
 
-    # Fallback: query directly
+    # Fallback / "all" mode: query directly
+    paper_filter = _is_paper_filter(mode)
     result = await session.execute(
         select(
             func.count().filter(Position.status == "open").label("open_count"),
@@ -39,7 +63,7 @@ async def portfolio_summary(
             func.count().filter(
                 (Position.status == "closed") & (Position.pnl_pct <= 0)
             ).label("losses"),
-        ).where(Position.is_paper == 1)
+        ).where(paper_filter)
     )
     row = result.one()
 
@@ -48,6 +72,7 @@ async def portfolio_summary(
     total_trades = wins + losses
 
     return {
+        "mode": mode,
         "open_count": row.open_count or 0,
         "closed_count": row.closed_count or 0,
         "total_invested_sol": float(row.total_invested or 0),
@@ -62,14 +87,15 @@ async def portfolio_summary(
 async def list_positions(
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
+    mode: str = Query("paper", pattern="^(paper|real|all)$"),
     pos_status: str = Query("open", alias="status", max_length=20),
     cursor: int | None = Query(None, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ) -> dict[str, Any]:
-    """List paper trading positions."""
+    """List trading positions — paper, real, or all."""
     query = (
         select(Position)
-        .where(Position.is_paper == 1, Position.status == pos_status)
+        .where(_is_paper_filter(mode), Position.status == pos_status)
     )
 
     if cursor:
@@ -96,6 +122,8 @@ async def list_positions(
             "max_price": float(p.max_price) if p.max_price else None,
             "status": p.status,
             "close_reason": p.close_reason,
+            "is_paper": bool(p.is_paper),
+            "tx_hash": getattr(p, "tx_hash", None),
             "opened_at": p.opened_at.isoformat() if p.opened_at else None,
             "closed_at": p.closed_at.isoformat() if p.closed_at else None,
         })
@@ -118,10 +146,10 @@ async def position_detail(
     if not pos:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
 
-    # Related trades
+    # Related trades — filter by same is_paper as the position
     trade_result = await session.execute(
         select(Trade)
-        .where(Trade.token_id == pos.token_id, Trade.is_paper == 1)
+        .where(Trade.token_id == pos.token_id, Trade.is_paper == pos.is_paper)
         .order_by(Trade.executed_at)
     )
     trades = trade_result.scalars().all()
@@ -151,6 +179,9 @@ async def position_detail(
             "amount_sol": float(t.amount_sol) if t.amount_sol else None,
             "price": float(t.price) if t.price else None,
             "slippage_pct": float(t.slippage_pct) if t.slippage_pct else None,
+            "fee_sol": float(t.fee_sol) if t.fee_sol else None,
+            "tx_hash": t.tx_hash,
+            "is_paper": bool(t.is_paper),
             "executed_at": t.executed_at.isoformat() if t.executed_at else None,
         })
 
@@ -161,9 +192,10 @@ async def position_detail(
 async def pnl_history(
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
+    mode: str = Query("paper", pattern="^(paper|real|all)$"),
     days: int = Query(30, ge=1, le=365),
 ) -> dict[str, Any]:
-    """Daily cumulative PnL for closed paper positions."""
+    """Daily cumulative PnL for closed positions — paper, real, or combined."""
     from datetime import UTC, datetime, timedelta
 
     cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=days)
@@ -174,7 +206,7 @@ async def pnl_history(
             func.sum(Position.pnl_usd).label("daily_pnl"),
         )
         .where(
-            Position.is_paper == 1,
+            _is_paper_filter(mode),
             Position.status == "closed",
             Position.closed_at >= cutoff,
         )

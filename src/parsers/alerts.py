@@ -201,6 +201,70 @@ class AlertDispatcher:
         )
         await self._send_telegram_text(text)
 
+    # ─── Real trading alerts ────────────────────────────────────────
+
+    async def send_real_open(
+        self,
+        symbol: str,
+        address: str,
+        price: float,
+        sol_amount: float,
+        action: str,
+        tx_hash: str,
+    ) -> None:
+        """Notify about a new REAL trading position."""
+        emoji = "💰💰" if action == "strong_buy" else "💰"
+        safe_name = html_mod.escape(symbol or address[:12])
+        text = (
+            f"{emoji} <b>REAL BUY</b>: <b>{safe_name}</b>\n\n"
+            f"Entry: ${price:.8g}\n"
+            f"Size: {sol_amount:.4f} SOL\n"
+            f"Signal: {action.upper()}\n"
+            f"TX: <code>{tx_hash[:16]}...</code>\n\n"
+            f"<code>{address}</code>"
+        )
+        logger.info(
+            f"[REAL] Opened {symbol or address[:12]} @ ${price:.8g} "
+            f"({sol_amount} SOL) tx={tx_hash[:16]}"
+        )
+        await self._send_telegram_text(text)
+
+    async def send_real_close(
+        self,
+        symbol: str,
+        address: str,
+        entry_price: float,
+        exit_price: float,
+        pnl_pct: float,
+        reason: str,
+        tx_hash: str,
+    ) -> None:
+        """Notify about a closed REAL trading position."""
+        emoji = "✅💰" if pnl_pct > 0 else "🔴💰"
+        safe_name = html_mod.escape(symbol or address[:12])
+        text = (
+            f"{emoji} <b>REAL SELL</b>: <b>{safe_name}</b>\n\n"
+            f"Entry: ${entry_price:.8g}\n"
+            f"Exit: ${exit_price:.8g}\n"
+            f"P&L: <b>{pnl_pct:+.1f}%</b>\n"
+            f"Reason: {reason}\n"
+            f"TX: <code>{tx_hash[:16]}...</code>\n\n"
+            f"<code>{address}</code>"
+        )
+        logger.info(
+            f"[REAL] Closed {symbol or address[:12]} "
+            f"P&L={pnl_pct:+.1f}% reason={reason} tx={tx_hash[:16]}"
+        )
+        await self._send_telegram_text(text)
+
+    async def send_real_error(self, message: str) -> None:
+        """Alert on critical real trading errors (circuit breaker, balance depleted)."""
+        text = f"🚨 <b>REAL TRADING ALERT</b>\n\n{html_mod.escape(message)}"
+        logger.warning(f"[REAL] Alert: {message}")
+        await self._send_telegram_text(text)
+
+    # ─── Paper trading reports ────────────────────────────────────
+
     async def send_paper_report(self, stats: dict) -> None:
         """Send periodic paper trading portfolio summary."""
         wr = stats["win_rate"] * 100

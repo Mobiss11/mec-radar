@@ -99,6 +99,21 @@ class Settings(BaseSettings):
     paper_stop_loss_pct: float = -50.0
     paper_timeout_hours: int = 8
 
+    # Real trading (DISABLED by default — requires wallet_private_key)
+    real_trading_enabled: bool = False
+    wallet_private_key: str = ""  # Base58 secret key — NEVER LOG THIS
+    real_sol_per_trade: float = 0.05  # ~$4.15 at SOL=$83
+    real_max_positions: int = 3
+    real_take_profit_x: float = 2.0
+    real_stop_loss_pct: float = -50.0
+    real_timeout_hours: int = 8
+    real_slippage_bps: int = 500  # 5%
+    real_min_liquidity_usd: float = 5000.0
+    real_priority_fee_lamports: int = 100000  # 0.0001 SOL
+    real_max_sol_exposure: float = 0.5  # Max total SOL in open positions
+    real_circuit_breaker_threshold: int = 3  # Pause after N consecutive failures
+    real_circuit_breaker_cooldown_sec: int = 1800  # 30 min cooldown
+
     # SolSniffer (paid plan — higher cap)
     enable_solsniffer: bool = True
     solsniffer_api_key: str = ""

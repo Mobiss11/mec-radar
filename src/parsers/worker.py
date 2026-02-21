@@ -499,6 +499,54 @@ async def run_parser() -> None:
         )
         logger.info("Paper trading engine enabled")
 
+    # Real trading engine
+    real_trader = None
+    if settings.trading_enabled and settings.real_trading_enabled and settings.wallet_private_key:
+        try:
+            from src.trading.real_trader import RealTrader
+            from src.trading.wallet import SolanaWallet
+            from src.trading.jupiter_swap import JupiterSwapClient
+            from src.trading.risk_manager import RiskManager, TradingCircuitBreaker
+
+            rpc_url = settings.helius_rpc_url or settings.solana_rpc_url
+            if not rpc_url:
+                logger.error("[REAL] No RPC URL configured, real trading disabled")
+            else:
+                wallet = SolanaWallet(settings.wallet_private_key, rpc_url)
+                swap_client = JupiterSwapClient(
+                    api_key=settings.jupiter_api_key,
+                    rpc_url=rpc_url,
+                    keypair=wallet.keypair,
+                    default_slippage_bps=settings.real_slippage_bps,
+                    priority_fee_lamports=settings.real_priority_fee_lamports,
+                )
+                risk_mgr = RiskManager(
+                    max_sol_per_trade=settings.real_sol_per_trade,
+                    max_positions=settings.real_max_positions,
+                    max_total_exposure_sol=settings.real_max_sol_exposure,
+                    min_liquidity_usd=settings.real_min_liquidity_usd,
+                )
+                circuit_breaker = TradingCircuitBreaker(
+                    threshold=settings.real_circuit_breaker_threshold,
+                    cooldown_sec=settings.real_circuit_breaker_cooldown_sec,
+                )
+                real_trader = RealTrader(
+                    wallet=wallet,
+                    swap_client=swap_client,
+                    risk_manager=risk_mgr,
+                    circuit_breaker=circuit_breaker,
+                    sol_per_trade=settings.real_sol_per_trade,
+                    max_positions=settings.real_max_positions,
+                    take_profit_x=settings.real_take_profit_x,
+                    stop_loss_pct=settings.real_stop_loss_pct,
+                    timeout_hours=settings.real_timeout_hours,
+                    alert_dispatcher=alert_dispatcher,
+                )
+                logger.info(f"[REAL] Real trading enabled. Wallet: {wallet.pubkey_str}")
+        except Exception as e:
+            logger.error(f"[REAL] Failed to initialize real trading: {e}")
+            real_trader = None
+
     # Build task list based on feature flags
     tasks: list[asyncio.Task] = []
 
@@ -542,6 +590,7 @@ async def run_parser() -> None:
                         gmgn, dexscreener, birdeye, enrichment_queue,
                         smart_money, alert_dispatcher, paper_trader,
                         pumpportal if settings.enable_pumpportal else None,
+                        real_trader=real_trader,
                         rugcheck=rugcheck,
                         jupiter=jupiter,
                         helius=helius,
@@ -623,6 +672,24 @@ async def run_parser() -> None:
         )
         logger.info("Paper trading sweep (5m) + report (1h) loops enabled")
 
+    # Real trading: real-time prices (15s) + sweep stale (5m)
+    if real_trader:
+        if birdeye or jupiter:
+            tasks.append(
+                asyncio.create_task(
+                    _real_price_loop(real_trader, birdeye=birdeye, jupiter=jupiter),
+                    name="real_price",
+                )
+            )
+            logger.info("[REAL] Real trading real-time prices enabled (15s)")
+        tasks.append(
+            asyncio.create_task(
+                _real_sweep_loop(real_trader),
+                name="real_sweep",
+            )
+        )
+        logger.info("[REAL] Real trading sweep (5m) loop enabled")
+
     # Signal decay loop
     if settings.signal_decay_enabled:
         tasks.append(
@@ -652,6 +719,7 @@ async def run_parser() -> None:
         registry.enrichment_queue = enrichment_queue
         registry.alert_dispatcher = alert_dispatcher
         registry.paper_trader = paper_trader
+        registry.real_trader = real_trader
         registry.solsniffer = solsniffer
         registry.redis = redis
 
@@ -858,6 +926,7 @@ async def _enrichment_worker(
     paper_trader: "PaperTrader | None" = None,
     pumpportal: PumpPortalClient | None = None,
     *,
+    real_trader: "RealTrader | None" = None,
     rugcheck: RugcheckClient | None = None,
     jupiter: JupiterClient | None = None,
     helius: HeliusClient | None = None,
@@ -974,6 +1043,7 @@ async def _enrichment_worker(
                         vybe=vybe, twitter=twitter,
                         tg_checker=tg_checker, llm_analyzer=llm_analyzer,
                         bubblemaps=bubblemaps, solsniffer=solsniffer,
+                        real_trader=real_trader,
                     )
             except Exception as e:
                 logger.opt(exception=True).error(
@@ -1141,6 +1211,7 @@ async def _enrich_token(
     llm_analyzer: LLMAnalyzerClient | None = None,
     bubblemaps: "BubblemapsClient | None" = None,
     solsniffer: "SolSnifferClient | None" = None,
+    real_trader: "RealTrader | None" = None,
 ) -> int | None:
     """Fetch data per stage config, save snapshot, compute score. Returns score."""
     config = STAGE_SCHEDULE[task.stage]
@@ -2984,6 +3055,20 @@ async def _enrich_token(
                             )
                         except Exception as e:
                             logger.debug(f"[PAPER] Error opening position: {e}")
+                    # Real trading: open position on signal
+                    if real_trader and sig.action in ("strong_buy", "buy"):
+                        try:
+                            await session.flush()
+                            from src.parsers.sol_price import get_sol_price_safe
+                            _sol_price_r = get_sol_price_safe()
+                            await real_trader.on_signal(
+                                session, signal_record, snapshot.price,
+                                symbol=token.symbol,
+                                liquidity_usd=float(snapshot.liquidity_usd) if snapshot.liquidity_usd else None,
+                                sol_price_usd=_sol_price_r,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[REAL] Error opening position: {e}")
             except Exception as e:
                 logger.debug(f"[SIGNAL] Error generating signal: {e}")
 
@@ -3010,6 +3095,30 @@ async def _enrich_token(
                 )
             except Exception as e:
                 logger.debug(f"[PAPER] Error updating positions: {e}")
+
+        # 15c. Real trading: update existing positions with current price
+        if real_trader and snapshot is not None and snapshot.price:
+            try:
+                from sqlalchemy import select as sa_select
+                from src.models.token import TokenOutcome
+
+                is_rug = False
+                outcome_stmt = sa_select(TokenOutcome).where(
+                    TokenOutcome.token_id == token.id
+                )
+                outcome_res = await session.execute(outcome_stmt)
+                outcome = outcome_res.scalar_one_or_none()
+                if outcome and outcome.is_rug is True:
+                    is_rug = True
+                from src.parsers.sol_price import get_sol_price
+                _liq_usd = float(snapshot.liquidity_usd or snapshot.dex_liquidity_usd or 0) or None
+                await real_trader.update_positions(
+                    session, token.id, snapshot.price, is_rug,
+                    liquidity_usd=_liq_usd,
+                    sol_price_usd=get_sol_price(),
+                )
+            except Exception as e:
+                logger.warning(f"[REAL] Error updating positions: {e}")
 
         # 16. Update outcome tracking (every stage from HOUR_4+ for early rug detection)
         _outcome_stages = {
@@ -3370,6 +3479,134 @@ async def _paper_report_loop(
             logger.debug(f"[PAPER] Report loop error: {e}")
 
         await asyncio.sleep(3600)  # Every hour
+
+
+async def _real_price_loop(
+    real_trader: "RealTrader",
+    birdeye: "BirdeyeClient | None" = None,
+    jupiter: "JupiterClient | None" = None,
+) -> None:
+    """Real-time price updates for open real positions.
+
+    Same pattern as _paper_price_loop but for is_paper=0 positions.
+    Triggers take_profit/stop_loss sell execution via Jupiter swap.
+    """
+    from sqlalchemy import select as sa_select
+
+    from src.db.database import async_session_factory
+    from src.models.trade import Position
+
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    sa_select(Position).where(
+                        Position.status == "open",
+                        Position.is_paper == 0,
+                    )
+                )
+                positions = list(result.scalars().all())
+
+            if not positions:
+                await asyncio.sleep(15)
+                continue
+
+            addresses = list({p.token_address for p in positions})
+
+            # Primary: Birdeye multi-price
+            token_prices: dict[int, Decimal] = {}
+            if birdeye:
+                try:
+                    be_prices = await birdeye.get_price_multi(addresses[:100])
+                    for pos in positions:
+                        bp = be_prices.get(pos.token_address)
+                        if bp and bp.value:
+                            token_prices[pos.token_id] = bp.value
+                except Exception as e:
+                    logger.debug(f"[REAL] Birdeye multi-price failed: {e}")
+
+            # Fallback: Jupiter batch
+            missing_addrs = [p.token_address for p in positions if p.token_id not in token_prices]
+            if jupiter and missing_addrs:
+                try:
+                    jp_prices = await jupiter.get_prices_batch(missing_addrs[:100])
+                    for pos in positions:
+                        if pos.token_id not in token_prices:
+                            jp = jp_prices.get(pos.token_address)
+                            if jp and jp.price:
+                                token_prices[pos.token_id] = jp.price
+                except Exception as e:
+                    logger.debug(f"[REAL] Jupiter batch fallback failed: {e}")
+
+            if not token_prices:
+                await asyncio.sleep(15)
+                continue
+
+            from src.parsers.sol_price import get_sol_price
+            _sol_usd = get_sol_price()
+            async with async_session_factory() as session:
+                from src.models.token import TokenSnapshot
+                from sqlalchemy import func as sa_func, and_
+
+                max_snap = (
+                    sa_select(
+                        TokenSnapshot.token_id,
+                        sa_func.max(TokenSnapshot.id).label("max_id"),
+                    )
+                    .where(TokenSnapshot.token_id.in_(list(token_prices.keys())))
+                    .group_by(TokenSnapshot.token_id)
+                    .subquery()
+                )
+                liq_result = await session.execute(
+                    sa_select(
+                        TokenSnapshot.token_id,
+                        TokenSnapshot.liquidity_usd,
+                        TokenSnapshot.dex_liquidity_usd,
+                    ).join(
+                        max_snap,
+                        and_(
+                            TokenSnapshot.token_id == max_snap.c.token_id,
+                            TokenSnapshot.id == max_snap.c.max_id,
+                        ),
+                    )
+                )
+                liq_map: dict[int, float | None] = {}
+                for row in liq_result.all():
+                    liq_val = float(row[1] or row[2] or 0) or None
+                    liq_map[row[0]] = liq_val
+
+                for token_id, price in token_prices.items():
+                    await real_trader.update_positions(
+                        session, token_id, price,
+                        liquidity_usd=liq_map.get(token_id),
+                        sol_price_usd=_sol_usd,
+                    )
+                await session.commit()
+
+        except Exception as e:
+            logger.debug(f"[REAL] Price loop error: {e}")
+
+        await asyncio.sleep(15)
+
+
+async def _real_sweep_loop(real_trader: "RealTrader") -> None:
+    """Close real positions that exceeded timeout (executes sell swaps)."""
+    from src.db.database import async_session_factory
+
+    await asyncio.sleep(120)
+
+    while True:
+        try:
+            async with async_session_factory() as session:
+                closed = await real_trader.sweep_stale_positions(session)
+                if closed > 0:
+                    await session.commit()
+        except Exception as e:
+            logger.debug(f"[REAL] Sweep loop error: {e}")
+
+        await asyncio.sleep(300)
 
 
 async def _data_cleanup_loop() -> None:

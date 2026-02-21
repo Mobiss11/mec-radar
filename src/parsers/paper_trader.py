@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.signal import Signal
 from src.models.trade import Position, Trade
+from src.trading.close_conditions import check_close_conditions
 
 if TYPE_CHECKING:
     from src.parsers.alerts import AlertDispatcher
@@ -212,56 +213,17 @@ class PaperTrader:
     ) -> str | None:
         """Check if position should be closed. Returns reason or None.
 
-        Close logic (aggressive profit capture for memecoins):
-        1. Rug detected → immediate close
-        2. Stop loss: -50% from entry → close
-        3. Take profit: >= 2x from entry → close (capture gains before dump)
-        4. Trailing stop: after hitting 1.5x, close if price drops 20% from max
-        5. Early stop: if < -20% after 30 minutes → close early (not recovering)
-        6. Timeout: 4 hours max → close
+        Delegates to shared close_conditions module (used by both paper and real trader).
         """
-        if is_rug:
-            return "rug"
-
-        if pos.entry_price and pos.entry_price > 0:
-            multiplier = float(current_price / pos.entry_price)
-            pnl_pct = float((current_price - pos.entry_price) / pos.entry_price * 100)
-
-            # Hard take profit at 2x (capture gains before dump)
-            if multiplier >= self._take_profit_x:
-                return "take_profit"
-
-            # Trailing stop: after 1.5x, protect gains — close if 20% drawdown from max
-            if pos.max_price and pos.max_price > 0:
-                max_mult = float(pos.max_price / pos.entry_price)
-                if max_mult >= 1.5:
-                    drawdown_from_max = float(
-                        (pos.max_price - current_price) / pos.max_price * 100
-                    )
-                    if drawdown_from_max >= 20:
-                        # Price gap: if actual PnL is worse than stop loss,
-                        # report as stop_loss for accurate reason tracking
-                        if pnl_pct <= self._stop_loss_pct:
-                            return "stop_loss"
-                        return "trailing_stop"
-
-            # Hard stop loss
-            if pnl_pct <= self._stop_loss_pct:
-                return "stop_loss"
-
-            # Early stop: cut losses faster in first 30 minutes
-            if pos.opened_at:
-                age = now - pos.opened_at
-                if age <= timedelta(minutes=30) and pnl_pct <= -20:
-                    return "early_stop"
-
-        # Timeout
-        if pos.opened_at:
-            age = now - pos.opened_at
-            if age >= timedelta(hours=self._timeout_hours):
-                return "timeout"
-
-        return None
+        return check_close_conditions(
+            pos,
+            current_price,
+            is_rug,
+            now,
+            take_profit_x=self._take_profit_x,
+            stop_loss_pct=self._stop_loss_pct,
+            timeout_hours=self._timeout_hours,
+        )
 
     async def _close_position(
         self,
