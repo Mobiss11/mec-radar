@@ -1,0 +1,72 @@
+{
+  "plansDirectory": "./docs/plans",
+  "enableAllProjectMcpServers": true,
+  "autoUpdatesChannel": "stable",
+  "permissions": {
+    "allow": [
+      "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)",
+      "Bash(poetry:*)", "Bash(uv:*)", "Bash(uv run:*)", "Bash(pip:*)",
+      "Bash(ruff:*)", "Bash(mypy:*)", "Bash(alembic:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git diff:*)",
+      "Bash(git log:*)", "Bash(git branch:*)", "Bash(git checkout:*)",
+      "Bash(git status:*)", "Bash(git stash:*)",
+      "Bash(make:*)",
+      "Bash(docker compose:*)", "Bash(docker-compose:*)",
+      "Bash(pnpm:*)", "Bash(npx:*)", "Bash(npm run:*)",
+      "Bash(prettier:*)", "Bash(eslint:*)", "Bash(playwright:*)",
+      "Bash(cat:*)", "Bash(ls:*)", "Bash(find:*)", "Bash(grep:*)",
+      "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(sort:*)",
+      "mcp__context7__*",
+      "mcp__serena__*",
+      "mcp__memory__*",
+      "mcp__sequential-thinking__*",
+      "mcp__github__*",
+      "mcp__figma__*",
+      "mcp__shadcn__*",
+      "mcp__beads__*",
+      "mcp__context-portal__*"
+    ],
+    "deny": [
+      "Read(.env)", "Read(.env.*)",
+      "Read(**/credentials*)", "Read(**/secrets*)",
+      "Write(.env*)", "Write(*.pem)", "Write(*.key)",
+      "Bash(rm -rf /)", "Bash(sudo:*)",
+      "Bash(git push:*)",
+      "Bash(curl * | sh)", "Bash(curl * | bash)", "Bash(wget * | sh)", "Bash(wget * | bash)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "env": {
+    "ENABLE_TOOL_SEARCH": "auto:5",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
+    "BASH_DEFAULT_TIMEOUT_MS": "300000",
+    "BASH_MAX_TIMEOUT_MS": "600000",
+    "MCP_TIMEOUT": "60000",
+    "MCP_TOOL_TIMEOUT": "120000",
+    "MAX_MCP_OUTPUT_TOKENS": "30000"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for f in $CLAUDE_FILE_PATHS; do case \"$f\" in *.py) ruff format --quiet \"$f\" 2>/dev/null && ruff check --fix --quiet \"$f\" 2>/dev/null;; *.ts|*.tsx|*.js|*.jsx|*.css|*.json) prettier --write \"$f\" 2>/dev/null;; esac; done; true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-files.sh\" ]]; then bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/protect-files.sh\"; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
