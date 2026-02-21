@@ -40,7 +40,7 @@ def trader():
     return PaperTrader(
         sol_per_trade=0.5,
         max_positions=3,
-        take_profit_x=3.0,
+        take_profit_x=2.0,
         stop_loss_pct=-50.0,
         timeout_hours=4,
     )
@@ -110,12 +110,12 @@ async def test_max_positions_enforced(db_session, trader):
 
 @pytest.mark.asyncio
 async def test_take_profit_closes_position(db_session, token, signal, trader):
-    """Position should close when price hits 3x."""
+    """Position should close when price hits 2x."""
     pos = await trader.on_signal(db_session, signal, Decimal("0.001"))
     await db_session.flush()
 
-    # Price goes to 3.5x entry
-    await trader.update_positions(db_session, token.id, Decimal("0.0035"))
+    # Price goes to 2.5x entry
+    await trader.update_positions(db_session, token.id, Decimal("0.0025"))
     await db_session.flush()
 
     result = await db_session.execute(

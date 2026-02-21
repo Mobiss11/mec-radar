@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     paper_trading_enabled: bool = True  # ENABLED for testing
     paper_sol_per_trade: float = 0.5
     paper_max_positions: int = 10
-    paper_take_profit_x: float = 3.0
+    paper_take_profit_x: float = 2.0
     paper_stop_loss_pct: float = -50.0
     paper_timeout_hours: int = 8
 
