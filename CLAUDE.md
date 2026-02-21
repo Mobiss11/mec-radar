@@ -86,16 +86,35 @@ GMGN (SOCKS5 proxy + circuit breaker), DexScreener, PumpPortal WS, RugCheck, GoP
 - ~~Solscan~~ — data covered by Birdeye/GMGN
 - ~~Dune~~ — historical analytics, not for real-time
 
+## Repository & Production
+- **Git**: https://github.com/Mobiss11/mec-radar
+- **Production server**: Hetzner CCX23 (4 vCPU, 16GB RAM, 160GB disk, $28.99/mo)
+  - IP: `178.156.247.90`
+  - OS: Ubuntu 24.04 LTS
+  - Path: `/opt/mec-radar`
+  - Service: `systemctl start|stop|restart mec-radar`
+  - Dashboard: `http://178.156.247.90:8080`
+  - Logs: `journalctl -u mec-radar -f`
+  - Python 3.12 + PostgreSQL 16 + Redis 7 + Node 22
+
 ## Команды
 ```bash
 # Dev (starts worker + dashboard on port 8080)
 .venv/bin/python -m src.main
+
+# Production
+systemctl restart mec-radar
+journalctl -u mec-radar -f
 
 # Тесты
 .venv/bin/python -m pytest tests/ -v
 
 # Миграции
 poetry run alembic upgrade head
+
+# Deploy update
+git push origin main
+ssh root@178.156.247.90 "cd /opt/mec-radar && git pull && .venv/bin/pip install -r requirements.txt && systemctl restart mec-radar"
 
 # Линтинг
 ruff check . --fix

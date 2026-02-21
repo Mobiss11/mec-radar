@@ -157,7 +157,7 @@ Signals generated at INITIAL and MIN_5 stages. Signal decay TTL (based on `updat
 - **Backend**: FastAPI running as asyncio task in same process as worker (shared event loop)
 - **Frontend**: React 18 + TypeScript + Vite + shadcn/ui + TailwindCSS + Recharts
 - **Auth**: JWT in httpOnly cookie (30min), bcrypt password from `DASHBOARD_ADMIN_PASSWORD`
-- **Access**: `http://localhost:8080` (configurable via `DASHBOARD_PORT`)
+- **Access**: `http://178.156.247.90:8080` (prod) / `http://localhost:8080` (dev)
 - FastAPI serves both API (`/api/v1/`) and static frontend (`/`) on one port
 - MetricsRegistry singleton provides direct access to runtime objects (clients, queues, paper trader)
 
@@ -177,3 +177,4 @@ Signals generated at INITIAL and MIN_5 stages. Signal decay TTL (based on `updat
 - **Phase 23** (2026-02-20): SharedRateLimiter (Birdeye 10 RPS across 3 workers), signal dedup, prescan Redis persistence, GMGN gradual recovery, SolSniffer atomic cap, gRPC timeouts, scoring v2/v3 alignment
 - **Phase 24** (2026-02-20): Signal atomic upsert (pg ON CONFLICT), alert dedup (address,action), entry slippage, DB indexes, GMGN timeout, worker loop resilience
 - **Phase 25** (2026-02-21): Stage starvation fix (queue FIFO within priority), MintInfo dict→object deserialization, signal calibration (rugcheck -4→-2, llm -3→-1, mutable -2→-1), portfolio is_paper type fix, web dashboard (FastAPI + React)
+- **Phase 26** (2026-02-21): Production deployment — GitHub repo (Mobiss11/mec-radar), Hetzner CCX23 server (178.156.247.90, Ubuntu 24.04, 4vCPU/16GB), systemd service, PostgreSQL data migration, firewall (UFW)
