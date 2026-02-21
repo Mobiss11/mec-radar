@@ -49,6 +49,8 @@ async def run_bot() -> None:
     try:
         bot = get_bot()
         dp = get_dispatcher()
+        # Clear any stale webhook to prevent TelegramConflictError
+        await bot.delete_webhook(drop_pending_updates=True)
         logger.info("[BOT] Starting Telegram bot (polling mode)")
         await dp.start_polling(bot, close_bot_session=False)
     except RuntimeError as e:

@@ -5,6 +5,7 @@ import signal
 
 from loguru import logger
 
+from src.bot.bot import stop_bot
 from src.db.redis import close_redis
 from src.parsers.worker import run_parser
 from src.utils.logger import setup_logger
@@ -41,6 +42,7 @@ async def main() -> None:
         except asyncio.CancelledError:
             pass
 
+    await stop_bot()
     await close_redis()
     logger.info("Shutdown complete")
 
