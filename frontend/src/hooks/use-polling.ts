@@ -4,6 +4,8 @@ interface UsePollingOptions<T> {
   fetcher: () => Promise<T>
   interval: number
   enabled?: boolean
+  /** Change this value to force an immediate re-fetch (e.g. filter key). */
+  key?: string | number
 }
 
 interface UsePollingResult<T> {
@@ -17,6 +19,7 @@ export function usePolling<T>({
   fetcher,
   interval,
   enabled = true,
+  key,
 }: UsePollingOptions<T>): UsePollingResult<T> {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -46,6 +49,7 @@ export function usePolling<T>({
     doFetch(false)
   }, [doFetch])
 
+  // Initial fetch + polling timer. Restarts when key changes (filter switch).
   useEffect(() => {
     mountedRef.current = true
     if (!enabled) return
@@ -57,7 +61,7 @@ export function usePolling<T>({
       mountedRef.current = false
       clearInterval(timer)
     }
-  }, [enabled, interval, doFetch])
+  }, [enabled, interval, doFetch, key])
 
   return { data, error, loading, refresh }
 }

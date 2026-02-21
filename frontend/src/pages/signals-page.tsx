@@ -32,7 +32,7 @@ export function SignalsPage() {
     [statusFilter, cursor],
   )
 
-  const { data, loading } = usePolling({ fetcher, interval: 10000 })
+  const { data, loading } = usePolling({ fetcher, interval: 10000, key: `${statusFilter}-${cursor}` })
   const items = (data?.items ?? []) as Array<Record<string, unknown>>
 
   return (

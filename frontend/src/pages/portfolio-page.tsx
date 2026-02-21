@@ -47,6 +47,7 @@ export function PortfolioPage() {
   const { data: posData, loading: posLoading } = usePolling({
     fetcher: posFetcher,
     interval: 15000,
+    key: `${posStatus}-${cursor}`,
   })
 
   const { data: pnlData, loading: pnlLoading } = usePolling({

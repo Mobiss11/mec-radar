@@ -49,12 +49,13 @@ export function TokensPage() {
     [search, sort, enrichedOnly, cursor],
   )
 
-  const { data, loading } = usePolling({ fetcher, interval: 10000 })
+  const { data, loading } = usePolling({ fetcher, interval: 10000, key: `${search}-${sort}-${enrichedOnly}-${cursor}` })
 
   const { data: detail, loading: detailLoading } = usePolling({
     fetcher: () => tokens.detail(selectedAddress!),
     interval: 15000,
     enabled: !!selectedAddress,
+    key: selectedAddress ?? "",
   })
 
   const items = (data?.items ?? []) as Array<Record<string, unknown>>
