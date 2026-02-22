@@ -16,7 +16,7 @@ from solders.keypair import Keypair  # type: ignore[import-untyped]
 from src.trading.jupiter_swap import (
     LAMPORTS_PER_SOL,
     QUOTE_URL,
-    SWAP_URL,
+    SWAP_INSTRUCTIONS_URL,
     WSOL_MINT,
     JupiterSwapClient,
     SwapResult,
@@ -62,6 +62,33 @@ def _make_quote_response(
         "outAmount": str(out_amount),
         "priceImpactPct": str(price_impact),
         "routePlan": [{"swapInfo": {"label": "Raydium"}}],
+    }
+
+
+def _make_swap_instructions_response() -> dict:
+    """Build a mock Jupiter swap-instructions response."""
+    return {
+        "computeBudgetInstructions": [
+            {
+                "programId": "ComputeBudget111111111111111111111111111111",
+                "accounts": [],
+                "data": base64.b64encode(b"\x02\x00\x00\x00").decode(),
+            }
+        ],
+        "setupInstructions": [],
+        "swapInstruction": {
+            "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+            "accounts": [
+                {
+                    "pubkey": "11111111111111111111111111111111",
+                    "isSigner": False,
+                    "isWritable": False,
+                }
+            ],
+            "data": base64.b64encode(b"\x01\x02\x03").decode(),
+        },
+        "cleanupInstruction": None,
+        "addressLookupTableAddresses": [],
     }
 
 
@@ -217,16 +244,14 @@ class TestBuyToken:
         )
 
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value="base64txdata")
-        client._sign_send_confirm = AsyncMock(return_value=swap_result)
+        client._execute_swap = AsyncMock(return_value=swap_result)
 
         result = await client.buy_token("TokenMint123", 500_000_000)
 
         assert result.success is True
         assert result.tx_hash == "txhash123"
         client._get_quote.assert_awaited_once()
-        client._get_swap_transaction.assert_awaited_once_with(quote)
-        client._sign_send_confirm.assert_awaited_once()
+        client._execute_swap.assert_awaited_once_with(quote)
 
     async def test_buy_quote_fails(self, client: JupiterSwapClient):
         """Failed quote returns retryable error."""
@@ -254,22 +279,27 @@ class TestBuyToken:
         quote = _make_quote_response(price_impact=10.0)
         swap_result = SwapResult(success=True, tx_hash="tx123", price_impact_pct=10.0)
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value="b64data")
-        client._sign_send_confirm = AsyncMock(return_value=swap_result)
+        client._execute_swap = AsyncMock(return_value=swap_result)
 
         result = await client.buy_token("TokenMint123", 500_000_000)
         assert result.success is True
 
-    async def test_buy_swap_tx_fails(self, client: JupiterSwapClient):
-        """Failed swap transaction build returns retryable error."""
+    async def test_buy_execute_swap_fails(self, client: JupiterSwapClient):
+        """Failed execute_swap returns error from pipeline."""
         quote = _make_quote_response()
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value=None)
+        client._execute_swap = AsyncMock(
+            return_value=SwapResult(
+                success=False,
+                error="Swap instructions fetch failed",
+                is_retryable=True,
+            )
+        )
 
         result = await client.buy_token("TokenMint123", 500_000_000)
 
         assert result.success is False
-        assert "transaction build failed" in result.error.lower()
+        assert "instructions" in result.error.lower()
         assert result.is_retryable is True
 
     async def test_buy_custom_slippage(self, client: JupiterSwapClient):
@@ -277,8 +307,7 @@ class TestBuyToken:
         quote = _make_quote_response()
         swap_result = SwapResult(success=True, tx_hash="tx", price_impact_pct=0.5)
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value="b64")
-        client._sign_send_confirm = AsyncMock(return_value=swap_result)
+        client._execute_swap = AsyncMock(return_value=swap_result)
 
         await client.buy_token("TokenMint123", 500_000_000, slippage_bps=200)
 
@@ -310,8 +339,7 @@ class TestSellToken:
         )
 
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value="base64sell")
-        client._sign_send_confirm = AsyncMock(return_value=swap_result)
+        client._execute_swap = AsyncMock(return_value=swap_result)
 
         result = await client.sell_token("TokenMint123", 10_000_000)
 
@@ -328,16 +356,21 @@ class TestSellToken:
         assert "Sell quote failed" in result.error
         assert result.is_retryable is True
 
-    async def test_sell_swap_tx_fails(self, client: JupiterSwapClient):
-        """Failed sell swap TX build returns retryable error."""
+    async def test_sell_execute_swap_fails(self, client: JupiterSwapClient):
+        """Failed sell execute returns retryable error."""
         quote = _make_quote_response()
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value=None)
+        client._execute_swap = AsyncMock(
+            return_value=SwapResult(
+                success=False,
+                error="Swap instructions fetch failed",
+                is_retryable=True,
+            )
+        )
 
         result = await client.sell_token("TokenMint123", 10_000_000)
 
         assert result.success is False
-        assert "tx build failed" in result.error.lower()
         assert result.is_retryable is True
 
     async def test_sell_no_price_impact_check(self, client: JupiterSwapClient):
@@ -345,46 +378,46 @@ class TestSellToken:
         quote = _make_quote_response(price_impact=25.0)  # high but should pass
         swap_result = SwapResult(success=True, tx_hash="selltx")
         client._get_quote = AsyncMock(return_value=quote)
-        client._get_swap_transaction = AsyncMock(return_value="b64")
-        client._sign_send_confirm = AsyncMock(return_value=swap_result)
+        client._execute_swap = AsyncMock(return_value=swap_result)
 
         result = await client.sell_token("TokenMint123", 10_000_000)
         assert result.success is True  # sell doesn't block on price impact
 
 
-# ── _get_swap_transaction ──────────────────────────────────────────────
+# ── _get_swap_instructions ───────────────────────────────────────────
 
 
-class TestGetSwapTransaction:
-    """Test swap transaction building."""
+class TestGetSwapInstructions:
+    """Test swap instructions fetching."""
 
-    async def test_swap_tx_success(self, client: JupiterSwapClient):
-        """Successful swap TX returns base64 string."""
+    async def test_instructions_success(self, client: JupiterSwapClient):
+        """Successful fetch returns instructions dict."""
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.json.return_value = {"swapTransaction": "base64encoded=="}
+        mock_response.json.return_value = _make_swap_instructions_response()
 
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.post = AsyncMock(return_value=mock_response)
 
         quote = _make_quote_response()
-        result = await client._get_swap_transaction(quote)
+        result = await client._get_swap_instructions(quote)
 
-        assert result == "base64encoded=="
+        assert result is not None
+        assert "swapInstruction" in result
 
-    async def test_swap_tx_missing_field(self, client: JupiterSwapClient):
-        """Empty swapTransaction field returns None."""
+    async def test_instructions_missing_swap(self, client: JupiterSwapClient):
+        """Response without swapInstruction returns None."""
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 200
-        mock_response.json.return_value = {"swapTransaction": ""}
+        mock_response.json.return_value = {"computeBudgetInstructions": []}
 
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.post = AsyncMock(return_value=mock_response)
 
-        result = await client._get_swap_transaction(_make_quote_response())
+        result = await client._get_swap_instructions(_make_quote_response())
         assert result is None
 
-    async def test_swap_tx_400_returns_none(self, client: JupiterSwapClient):
+    async def test_instructions_400_returns_none(self, client: JupiterSwapClient):
         """400 error returns None without retry."""
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 400
@@ -393,10 +426,10 @@ class TestGetSwapTransaction:
         client._http = AsyncMock(spec=httpx.AsyncClient)
         client._http.post = AsyncMock(return_value=mock_response)
 
-        result = await client._get_swap_transaction(_make_quote_response())
+        result = await client._get_swap_instructions(_make_quote_response())
         assert result is None
 
-    async def test_swap_tx_500_retries(self, client: JupiterSwapClient):
+    async def test_instructions_500_retries(self, client: JupiterSwapClient):
         """Server error retries then fails."""
         mock_response = MagicMock(spec=httpx.Response)
         mock_response.status_code = 500
@@ -405,10 +438,28 @@ class TestGetSwapTransaction:
         client._http.post = AsyncMock(return_value=mock_response)
 
         with patch("src.trading.jupiter_swap.asyncio.sleep", new_callable=AsyncMock):
-            result = await client._get_swap_transaction(_make_quote_response())
+            result = await client._get_swap_instructions(_make_quote_response())
 
         assert result is None
         assert client._http.post.await_count == 3  # 1 + 2 retries
+
+    async def test_instructions_429_retries(self, client: JupiterSwapClient):
+        """Rate limit (429) should trigger retry."""
+        mock_429 = MagicMock(spec=httpx.Response)
+        mock_429.status_code = 429
+
+        mock_200 = MagicMock(spec=httpx.Response)
+        mock_200.status_code = 200
+        mock_200.json.return_value = _make_swap_instructions_response()
+
+        client._http = AsyncMock(spec=httpx.AsyncClient)
+        client._http.post = AsyncMock(side_effect=[mock_429, mock_200])
+
+        with patch("src.trading.jupiter_swap.asyncio.sleep", new_callable=AsyncMock):
+            result = await client._get_swap_instructions(_make_quote_response())
+
+        assert result is not None
+        assert client._http.post.await_count == 2
 
 
 # ── _send_raw_transaction ──────────────────────────────────────────────
@@ -504,11 +555,11 @@ class TestSendRawTransaction:
         assert client._rpc_http.post.await_count == 3
 
 
-# ── _wait_for_confirmation ─────────────────────────────────────────────
+# ── _wait_for_confirmation_with_resend ───────────────────────────────
 
 
-class TestWaitForConfirmation:
-    """Test transaction confirmation polling."""
+class TestWaitForConfirmationWithResend:
+    """Test transaction confirmation polling with periodic re-sends."""
 
     async def test_confirmed_immediately(self, client: JupiterSwapClient):
         """Transaction confirmed on first poll returns True."""
@@ -530,7 +581,9 @@ class TestWaitForConfirmation:
         client._rpc_http = AsyncMock(spec=httpx.AsyncClient)
         client._rpc_http.post = AsyncMock(return_value=mock_response)
 
-        result = await client._wait_for_confirmation("txhash123", timeout=5)
+        result = await client._wait_for_confirmation_with_resend(
+            "txhash123", "base64tx", timeout=5
+        )
         assert result is True
 
     async def test_finalized_accepted(self, client: JupiterSwapClient):
@@ -553,7 +606,9 @@ class TestWaitForConfirmation:
         client._rpc_http = AsyncMock(spec=httpx.AsyncClient)
         client._rpc_http.post = AsyncMock(return_value=mock_response)
 
-        result = await client._wait_for_confirmation("txhash123", timeout=5)
+        result = await client._wait_for_confirmation_with_resend(
+            "txhash123", "base64tx", timeout=5
+        )
         assert result is True
 
     async def test_on_chain_error_returns_false(self, client: JupiterSwapClient):
@@ -576,7 +631,9 @@ class TestWaitForConfirmation:
         client._rpc_http = AsyncMock(spec=httpx.AsyncClient)
         client._rpc_http.post = AsyncMock(return_value=mock_response)
 
-        result = await client._wait_for_confirmation("txhash123", timeout=5)
+        result = await client._wait_for_confirmation_with_resend(
+            "txhash123", "base64tx", timeout=5
+        )
         assert result is False
 
     async def test_timeout_returns_false(self, client: JupiterSwapClient):
@@ -594,7 +651,9 @@ class TestWaitForConfirmation:
         client._rpc_http.post = AsyncMock(return_value=mock_response)
 
         with patch("src.trading.jupiter_swap.asyncio.sleep", new_callable=AsyncMock):
-            result = await client._wait_for_confirmation("txhash123", timeout=4)
+            result = await client._wait_for_confirmation_with_resend(
+                "txhash123", "base64tx", timeout=4
+            )
 
         assert result is False
 
@@ -619,15 +678,105 @@ class TestWaitForConfirmation:
         }
 
         client._rpc_http = AsyncMock(spec=httpx.AsyncClient)
+        # pending → confirmed. May also include resend calls between them,
+        # so we allow extra calls by returning confirmed for all subsequent.
         client._rpc_http.post = AsyncMock(
-            side_effect=[mock_pending, mock_confirmed]
+            side_effect=[mock_pending, mock_confirmed, mock_confirmed]
         )
 
         with patch("src.trading.jupiter_swap.asyncio.sleep", new_callable=AsyncMock):
-            result = await client._wait_for_confirmation("txhash123", timeout=10)
+            result = await client._wait_for_confirmation_with_resend(
+                "txhash123", "base64tx", timeout=10
+            )
 
         assert result is True
-        assert client._rpc_http.post.await_count == 2
+
+
+# ── _execute_swap ─────────────────────────────────────────────────────
+
+
+class TestExecuteSwap:
+    """Test the full swap execution pipeline."""
+
+    async def test_execute_swap_success(self, client: JupiterSwapClient):
+        """Full pipeline returns SwapResult with success."""
+        quote = _make_quote_response()
+
+        client._get_swap_instructions = AsyncMock(
+            return_value=_make_swap_instructions_response()
+        )
+        client._build_and_sign_tx = AsyncMock(return_value=("base64tx", "sig123"))
+        client._send_raw_transaction = AsyncMock(return_value="txhash456")
+        client._wait_for_confirmation_with_resend = AsyncMock(return_value=True)
+
+        result = await client._execute_swap(quote)
+
+        assert result.success is True
+        assert result.tx_hash == "txhash456"
+        client._get_swap_instructions.assert_awaited_once_with(quote)
+        client._build_and_sign_tx.assert_awaited_once()
+        client._send_raw_transaction.assert_awaited_once_with("base64tx")
+        client._wait_for_confirmation_with_resend.assert_awaited_once_with(
+            "txhash456", "base64tx"
+        )
+
+    async def test_execute_swap_instructions_fail(self, client: JupiterSwapClient):
+        """Instructions fetch failure returns retryable error."""
+        quote = _make_quote_response()
+        client._get_swap_instructions = AsyncMock(return_value=None)
+
+        result = await client._execute_swap(quote)
+
+        assert result.success is False
+        assert "instructions" in result.error.lower()
+        assert result.is_retryable is True
+
+    async def test_execute_swap_build_tx_fail(self, client: JupiterSwapClient):
+        """TX build failure returns error."""
+        quote = _make_quote_response()
+        client._get_swap_instructions = AsyncMock(
+            return_value=_make_swap_instructions_response()
+        )
+        client._build_and_sign_tx = AsyncMock(
+            side_effect=Exception("Failed to compile message")
+        )
+
+        result = await client._execute_swap(quote)
+
+        assert result.success is False
+        assert "build/sign failed" in result.error.lower()
+
+    async def test_execute_swap_send_fail(self, client: JupiterSwapClient):
+        """Send failure returns retryable error."""
+        quote = _make_quote_response()
+        client._get_swap_instructions = AsyncMock(
+            return_value=_make_swap_instructions_response()
+        )
+        client._build_and_sign_tx = AsyncMock(return_value=("base64tx", "sig123"))
+        client._send_raw_transaction = AsyncMock(return_value=None)
+
+        result = await client._execute_swap(quote)
+
+        assert result.success is False
+        assert "rpc failed" in result.error.lower()
+        assert result.is_retryable is True
+
+    async def test_execute_swap_confirmation_timeout(self, client: JupiterSwapClient):
+        """Confirmation timeout returns non-retryable failure with tx_hash."""
+        quote = _make_quote_response()
+        client._get_swap_instructions = AsyncMock(
+            return_value=_make_swap_instructions_response()
+        )
+        client._build_and_sign_tx = AsyncMock(return_value=("base64tx", "sig123"))
+        client._send_raw_transaction = AsyncMock(return_value="txhash789")
+        client._wait_for_confirmation_with_resend = AsyncMock(return_value=False)
+
+        result = await client._execute_swap(quote)
+
+        assert result.success is False
+        assert result.tx_hash == "txhash789"
+        assert "timeout" in result.error.lower()
+        assert result.is_retryable is False
 
 
 # ── close ──────────────────────────────────────────────────────────────
