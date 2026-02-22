@@ -271,6 +271,7 @@ async def pnl_history(
 async def close_position(
     position_id: int,
     request: Request,
+    force: bool = Query(False, description="Force close without swap (for rug pulls)"),
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -279,6 +280,7 @@ async def close_position(
     Requires CSRF token in X-CSRF-Token header.
     Paper positions are closed immediately.
     Real positions trigger a Jupiter sell swap.
+    Use ?force=true to close without swap (rug pull / dead pool).
     """
     csrf_token = request.headers.get("X-CSRF-Token", "")
     if not verify_csrf_token(csrf_token, user):
@@ -315,6 +317,19 @@ async def close_position(
         await trader._close_position(session, pos, "manual_close", price)
         await session.commit()
         logger.info(f"[API] Manual close paper position {pos.symbol} id={position_id}")
+    elif force:
+        # Force close — no swap, just mark as closed (rug pull / dead pool)
+        from datetime import datetime, timezone
+
+        pos.status = "closed"
+        pos.close_reason = "manual_force_close"
+        pos.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        pos.pnl_pct = Decimal("-100")
+        await session.commit()
+        logger.warning(
+            f"[API] Force close real position {pos.symbol} id={position_id} "
+            f"(no swap — tokens likely worthless)"
+        )
     else:
         # Real close — execute Jupiter sell swap
         trader = registry.real_trader
@@ -333,7 +348,7 @@ async def close_position(
         if not ok:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Swap execution failed — check circuit breaker",
+                detail="Swap failed — pool may be dead. Use force close to write off position.",
             )
         await session.commit()
         logger.info(f"[API] Manual close real position {pos.symbol} id={position_id}")
@@ -341,6 +356,6 @@ async def close_position(
     return {
         "ok": True,
         "position_id": position_id,
-        "close_reason": "manual_close",
+        "close_reason": "manual_force_close" if force else "manual_close",
         "pnl_pct": float(pos.pnl_pct) if pos.pnl_pct else None,
     }

@@ -122,9 +122,9 @@ export const portfolio = {
     request<{ items: Array<Record<string, unknown>> }>(
       `/portfolio/pnl-history?days=${days}&mode=${mode}`,
     ),
-  closePosition: (positionId: number, csrfToken: string) =>
+  closePosition: (positionId: number, csrfToken: string, force = false) =>
     request<{ ok: boolean; position_id: number; close_reason: string; pnl_pct: number | null }>(
-      `/portfolio/positions/${positionId}/close`,
+      `/portfolio/positions/${positionId}/close${force ? "?force=true" : ""}`,
       {
         method: "POST",
         headers: { "X-CSRF-Token": csrfToken },

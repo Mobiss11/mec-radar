@@ -98,16 +98,26 @@ export function PortfolioPage() {
   const chartColor = CHART_COLORS[mode]
   const showRealCards = mode !== "paper" && s?.real_trading_enabled
 
-  const handleClose = useCallback(async (positionId: number) => {
+  const [forceCloseId, setForceCloseId] = useState<number | null>(null)
+
+  const handleClose = useCallback(async (positionId: number, force = false) => {
     setClosingId(positionId)
     try {
       // Always refresh CSRF before mutating request (jti must match current JWT)
       const token = await refreshCsrf()
-      await portfolio.closePosition(positionId, token)
+      await portfolio.closePosition(positionId, token, force)
       setConfirmId(null)
+      setForceCloseId(null)
       setRefreshKey((k) => k + 1)
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to close position")
+      const msg = err instanceof Error ? err.message : "Failed to close position"
+      if (msg.includes("force close")) {
+        // Swap failed, offer force close
+        setForceCloseId(positionId)
+        setConfirmId(null)
+      } else {
+        alert(msg)
+      }
     } finally {
       setClosingId(null)
     }
@@ -383,7 +393,34 @@ export function PortfolioPage() {
                     )}
                   </div>
                   {posStatus === "open" && (
-                    confirmId === (p.id as number) ? (
+                    forceCloseId === (p.id as number) ? (
+                      <div className="flex flex-col items-end gap-1">
+                        <span className="text-[10px] text-red-400">Swap failed — pool dead?</span>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            className="h-7 px-2 text-xs"
+                            disabled={closingId === (p.id as number)}
+                            onClick={() => handleClose(p.id as number, true)}
+                          >
+                            {closingId === (p.id as number) ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              "Force Close (-100%)"
+                            )}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-1.5 text-xs"
+                            onClick={() => setForceCloseId(null)}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </div>
+                    ) : confirmId === (p.id as number) ? (
                       <div className="flex items-center gap-1">
                         <Button
                           variant="destructive"
