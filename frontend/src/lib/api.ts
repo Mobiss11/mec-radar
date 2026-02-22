@@ -122,6 +122,14 @@ export const portfolio = {
     request<{ items: Array<Record<string, unknown>> }>(
       `/portfolio/pnl-history?days=${days}&mode=${mode}`,
     ),
+  closePosition: (positionId: number, csrfToken: string) =>
+    request<{ ok: boolean; position_id: number; close_reason: string; pnl_pct: number | null }>(
+      `/portfolio/positions/${positionId}/close`,
+      {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+      },
+    ),
 }
 
 /* Settings */

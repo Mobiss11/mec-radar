@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react"
 import { usePolling } from "@/hooks/use-polling"
+import { useAuth } from "@/hooks/use-auth"
 import { portfolio } from "@/lib/api"
 import { StatCard } from "@/components/common/stat-card"
 import { AddressBadge } from "@/components/common/address-badge"
@@ -19,6 +20,8 @@ import {
   ShieldCheck,
   ShieldAlert,
   ExternalLink,
+  X,
+  Loader2,
 } from "lucide-react"
 import {
   AreaChart,
@@ -52,11 +55,15 @@ export function PortfolioPage() {
   const [mode, setMode] = useState<PortfolioMode>("paper")
   const [posStatus, setPosStatus] = useState("open")
   const [cursor, setCursor] = useState<number | undefined>(undefined)
+  const [closingId, setClosingId] = useState<number | null>(null)
+  const [confirmId, setConfirmId] = useState<number | null>(null)
+  const { csrfToken, refreshCsrf } = useAuth()
+  const [refreshKey, setRefreshKey] = useState(0)
 
   const { data: summary, loading: sumLoading } = usePolling({
     fetcher: () => portfolio.summary(mode),
     interval: 15000,
-    key: `summary-${mode}`,
+    key: `summary-${mode}-${refreshKey}`,
   })
 
   const posFetcher = useCallback(
@@ -73,7 +80,7 @@ export function PortfolioPage() {
   const { data: posData, loading: posLoading } = usePolling({
     fetcher: posFetcher,
     interval: 15000,
-    key: `pos-${mode}-${posStatus}-${cursor}`,
+    key: `pos-${mode}-${posStatus}-${cursor}-${refreshKey}`,
   })
 
   const { data: pnlData, loading: pnlLoading } = usePolling({
@@ -90,6 +97,20 @@ export function PortfolioPage() {
 
   const chartColor = CHART_COLORS[mode]
   const showRealCards = mode !== "paper" && s?.real_trading_enabled
+
+  const handleClose = useCallback(async (positionId: number) => {
+    setClosingId(positionId)
+    try {
+      const token = csrfToken ?? (await refreshCsrf())
+      await portfolio.closePosition(positionId, token)
+      setConfirmId(null)
+      setRefreshKey((k) => k + 1)
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Failed to close position")
+    } finally {
+      setClosingId(null)
+    }
+  }, [csrfToken, refreshCsrf])
 
   return (
     <div className="space-y-6">
@@ -333,21 +354,59 @@ export function PortfolioPage() {
                     )}
                   </div>
                 </div>
-                <div className="text-right">
-                  <p
-                    className={cn(
-                      "font-data text-sm font-bold",
-                      (p.pnl_pct as number) >= 0
-                        ? "text-emerald-400"
-                        : "text-red-400",
-                    )}
-                  >
-                    {formatPct(p.pnl_pct as number)}
-                  </p>
-                  {p.pnl_usd != null && (
-                    <p className="font-data text-xs text-muted-foreground">
-                      {formatUsd(p.pnl_usd as number)}
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <p
+                      className={cn(
+                        "font-data text-sm font-bold",
+                        (p.pnl_pct as number) >= 0
+                          ? "text-emerald-400"
+                          : "text-red-400",
+                      )}
+                    >
+                      {formatPct(p.pnl_pct as number)}
                     </p>
+                    {p.pnl_usd != null && (
+                      <p className="font-data text-xs text-muted-foreground">
+                        {formatUsd(p.pnl_usd as number)}
+                      </p>
+                    )}
+                  </div>
+                  {posStatus === "open" && (
+                    confirmId === (p.id as number) ? (
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          disabled={closingId === (p.id as number)}
+                          onClick={() => handleClose(p.id as number)}
+                        >
+                          {closingId === (p.id as number) ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            "Confirm"
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-1.5 text-xs"
+                          onClick={() => setConfirmId(null)}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-muted-foreground hover:text-red-400 hover:bg-red-500/10"
+                        onClick={() => setConfirmId(p.id as number)}
+                      >
+                        Close
+                      </Button>
+                    )
                   )}
                 </div>
               </div>

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from loguru import logger
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.auth import verify_csrf_token
 from src.api.dependencies import get_current_user, get_session
 from src.api.metrics_registry import registry
 from src.models.trade import Position, Trade
@@ -262,3 +265,82 @@ async def pnl_history(
         })
 
     return {"items": items}
+
+
+@router.post("/positions/{position_id}/close")
+async def close_position(
+    position_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Manually close an open position at current price.
+
+    Requires CSRF token in X-CSRF-Token header.
+    Paper positions are closed immediately.
+    Real positions trigger a Jupiter sell swap.
+    """
+    csrf_token = request.headers.get("X-CSRF-Token", "")
+    if not verify_csrf_token(csrf_token, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid CSRF token",
+        )
+
+    result = await session.execute(
+        select(Position).where(Position.id == position_id)
+    )
+    pos = result.scalar_one_or_none()
+    if not pos:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Position not found"
+        )
+    if pos.status != "open":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Position is already closed",
+        )
+
+    # Use current_price from the position (updated by price loop)
+    price = pos.current_price or pos.entry_price or Decimal("0")
+
+    if pos.is_paper:
+        # Paper close — direct DB update via paper_trader
+        trader = registry.paper_trader
+        if not trader:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Paper trader not running",
+            )
+        await trader._close_position(session, pos, "manual_close", price)
+        await session.commit()
+        logger.info(f"[API] Manual close paper position {pos.symbol} id={position_id}")
+    else:
+        # Real close — execute Jupiter sell swap
+        trader = registry.real_trader
+        if not trader:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Real trader not running",
+            )
+        from src.parsers.sol_price import get_sol_price_safe
+
+        sol_price = await get_sol_price_safe()
+        ok = await trader._execute_close(
+            session, pos, "manual_close", price,
+            liquidity_usd=None, sol_price_usd=sol_price,
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Swap execution failed — check circuit breaker",
+            )
+        await session.commit()
+        logger.info(f"[API] Manual close real position {pos.symbol} id={position_id}")
+
+    return {
+        "ok": True,
+        "position_id": position_id,
+        "close_reason": "manual_close",
+        "pnl_pct": float(pos.pnl_pct) if pos.pnl_pct else None,
+    }

@@ -483,7 +483,7 @@ class RealTrader:
             "closed_count": len(closed_positions),
             "total_invested_sol": total_invested,
             "total_pnl_usd": total_pnl,
-            "win_rate": wins / max(wins + losses, 1),
+            "win_rate": round(wins / max(wins + losses, 1) * 100, 1),
             "wins": wins,
             "losses": losses,
             "wallet_balance": await self._wallet.get_sol_balance(),
