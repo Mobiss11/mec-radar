@@ -112,7 +112,10 @@ export interface SignalItem {
 }
 
 /* Portfolio */
+export type PortfolioMode = "paper" | "real" | "all"
+
 export interface PortfolioSummary {
+  mode: PortfolioMode
   open_count: number
   closed_count: number
   total_invested_sol: number
@@ -120,6 +123,10 @@ export interface PortfolioSummary {
   win_rate: number
   wins: number
   losses: number
+  real_trading_enabled: boolean
+  wallet_balance?: number | null
+  circuit_breaker_tripped?: boolean | null
+  total_failures?: number | null
 }
 
 export interface PositionItem {
@@ -134,6 +141,8 @@ export interface PositionItem {
   max_price: number | null
   status: string
   close_reason: string | null
+  is_paper: boolean
+  tx_hash: string | null
   opened_at: string | null
   closed_at: string | null
 }

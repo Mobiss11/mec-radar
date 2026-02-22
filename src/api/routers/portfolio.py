@@ -43,9 +43,15 @@ async def portfolio_summary(
     """Portfolio summary — paper, real, or combined."""
     # Use trader's built-in summary for single-mode fast path
     if mode == "paper" and registry.paper_trader:
-        return await registry.paper_trader.get_portfolio_summary(session)
+        summary = await registry.paper_trader.get_portfolio_summary(session)
+        summary["mode"] = "paper"
+        summary["real_trading_enabled"] = registry.real_trader is not None
+        return summary
     if mode == "real" and registry.real_trader:
-        return await registry.real_trader.get_portfolio_summary(session)
+        summary = await registry.real_trader.get_portfolio_summary(session)
+        summary["mode"] = "real"
+        summary["real_trading_enabled"] = True
+        return summary
 
     # Fallback / "all" mode: query directly
     paper_filter = _is_paper_filter(mode)
@@ -71,7 +77,7 @@ async def portfolio_summary(
     losses = row.losses or 0
     total_trades = wins + losses
 
-    return {
+    result_dict: dict[str, Any] = {
         "mode": mode,
         "open_count": row.open_count or 0,
         "closed_count": row.closed_count or 0,
@@ -80,7 +86,20 @@ async def portfolio_summary(
         "win_rate": round(wins / total_trades * 100, 1) if total_trades > 0 else 0.0,
         "wins": wins,
         "losses": losses,
+        "real_trading_enabled": registry.real_trader is not None,
     }
+
+    # Attach real trader wallet / circuit breaker info when available
+    if registry.real_trader and mode in ("real", "all"):
+        try:
+            result_dict["wallet_balance"] = await registry.real_trader._wallet.get_sol_balance()
+            result_dict["circuit_breaker_tripped"] = registry.real_trader._circuit.is_tripped
+            result_dict["total_failures"] = registry.real_trader._circuit.total_failures
+        except Exception:
+            result_dict["wallet_balance"] = None
+            result_dict["circuit_breaker_tripped"] = None
+
+    return result_dict
 
 
 @router.get("/positions")
@@ -108,8 +127,24 @@ async def list_positions(
     positions = result.scalars().all()
 
     has_more = len(positions) > limit
+    page = positions[:limit]
+
+    # Batch-load tx_hash from Trade for real positions (Position has no tx_hash column)
+    tx_hash_map: dict[int, str | None] = {}
+    real_token_ids = [p.token_id for p in page if not p.is_paper]
+    if real_token_ids:
+        # Get first tx_hash per token (buy side) for real trades
+        tx_result = await session.execute(
+            select(Trade.token_id, Trade.tx_hash)
+            .where(Trade.token_id.in_(real_token_ids), Trade.is_paper == 0, Trade.side == "buy")
+            .order_by(Trade.executed_at)
+        )
+        for row in tx_result.all():
+            if row.token_id not in tx_hash_map:
+                tx_hash_map[row.token_id] = row.tx_hash
+
     items = []
-    for p in positions[:limit]:
+    for p in page:
         items.append({
             "id": p.id,
             "token_address": p.token_address,
@@ -123,7 +158,7 @@ async def list_positions(
             "status": p.status,
             "close_reason": p.close_reason,
             "is_paper": bool(p.is_paper),
-            "tx_hash": getattr(p, "tx_hash", None),
+            "tx_hash": tx_hash_map.get(p.token_id) if not p.is_paper else None,
             "opened_at": p.opened_at.isoformat() if p.opened_at else None,
             "closed_at": p.closed_at.isoformat() if p.closed_at else None,
         })

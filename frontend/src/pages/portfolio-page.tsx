@@ -8,12 +8,17 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
 import { formatPct, formatSol, formatUsd, timeAgo } from "@/lib/format"
 import { cn } from "@/lib/utils"
+import type { PortfolioMode } from "@/types/api"
 import {
   Briefcase,
   TrendingUp,
   TrendingDown,
   Target,
   ChevronRight,
+  Wallet,
+  ShieldCheck,
+  ShieldAlert,
+  ExternalLink,
 } from "lucide-react"
 import {
   AreaChart,
@@ -25,58 +30,110 @@ import {
   ResponsiveContainer,
 } from "recharts"
 
+const MODE_TABS: { value: PortfolioMode; label: string; icon: string }[] = [
+  { value: "paper", label: "Paper", icon: "📄" },
+  { value: "real", label: "Real", icon: "💰" },
+  { value: "all", label: "All", icon: "📊" },
+]
+
+const CHART_COLORS: Record<PortfolioMode, string> = {
+  paper: "oklch(0.72 0.19 155)",
+  real: "oklch(0.76 0.16 85)",
+  all: "oklch(0.65 0.15 250)",
+}
+
+const SUBTITLE: Record<PortfolioMode, string> = {
+  paper: "Paper trading performance",
+  real: "Real trading performance",
+  all: "All trading combined",
+}
+
 export function PortfolioPage() {
+  const [mode, setMode] = useState<PortfolioMode>("paper")
   const [posStatus, setPosStatus] = useState("open")
   const [cursor, setCursor] = useState<number | undefined>(undefined)
 
   const { data: summary, loading: sumLoading } = usePolling({
-    fetcher: portfolio.summary,
+    fetcher: () => portfolio.summary(mode),
     interval: 15000,
+    key: `summary-${mode}`,
   })
 
   const posFetcher = useCallback(
     () =>
       portfolio.positions({
+        mode,
         status: posStatus,
         limit: 20,
         ...(cursor != null ? { cursor } : {}),
       }),
-    [posStatus, cursor],
+    [mode, posStatus, cursor],
   )
 
   const { data: posData, loading: posLoading } = usePolling({
     fetcher: posFetcher,
     interval: 15000,
-    key: `${posStatus}-${cursor}`,
+    key: `pos-${mode}-${posStatus}-${cursor}`,
   })
 
   const { data: pnlData, loading: pnlLoading } = usePolling({
-    fetcher: () => portfolio.pnlHistory(30),
+    fetcher: () => portfolio.pnlHistory(30, mode),
     interval: 60000,
+    key: `pnl-${mode}`,
   })
 
-  const s = summary as Record<string, number> | null
+  const s = summary as Record<string, number | boolean | null> | null
   const positions = (posData?.items ?? []) as Array<Record<string, unknown>>
   const pnlItems = ((pnlData as Record<string, unknown>)?.items ?? []) as Array<
     Record<string, unknown>
   >
 
+  const chartColor = CHART_COLORS[mode]
+  const showRealCards = mode !== "paper" && s?.real_trading_enabled
+
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Portfolio</h1>
-        <p className="text-sm text-muted-foreground">
-          Paper trading performance
-        </p>
+      {/* Header + mode tabs */}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Portfolio</h1>
+          <p className="text-sm text-muted-foreground">
+            {SUBTITLE[mode]}
+          </p>
+        </div>
+
+        <div className="flex gap-1 rounded-lg border border-border/50 bg-card/30 p-1">
+          {MODE_TABS.map((tab) => (
+            <button
+              key={tab.value}
+              onClick={() => {
+                setMode(tab.value)
+                setCursor(undefined)
+              }}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                mode === tab.value
+                  ? "bg-primary/10 text-primary shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-card/50",
+              )}
+            >
+              <span>{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className={cn(
+        "grid gap-4",
+        showRealCards ? "grid-cols-2 lg:grid-cols-3" : "grid-cols-2 lg:grid-cols-4",
+      )}>
         <StatCard
           label="Total PnL"
-          value={s ? formatUsd(s.total_pnl_usd) : null}
+          value={s ? formatUsd(s.total_pnl_usd as number) : null}
           icon={
-            s && s.total_pnl_usd >= 0 ? (
+            s && (s.total_pnl_usd as number) >= 0 ? (
               <TrendingUp className="h-4 w-4" />
             ) : (
               <TrendingDown className="h-4 w-4" />
@@ -101,6 +158,43 @@ export function PortfolioPage() {
           trend={s ? `${s.wins}W / ${s.losses}L` : undefined}
           loading={sumLoading}
         />
+
+        {/* Real trading cards — wallet + circuit breaker */}
+        {showRealCards && (
+          <>
+            <StatCard
+              label="Wallet Balance"
+              value={
+                s?.wallet_balance != null
+                  ? `${Number(s.wallet_balance).toFixed(4)} SOL`
+                  : "—"
+              }
+              icon={<Wallet className="h-4 w-4" />}
+              loading={sumLoading}
+            />
+            <StatCard
+              label="Circuit Breaker"
+              value={
+                s?.circuit_breaker_tripped == null
+                  ? "—"
+                  : s.circuit_breaker_tripped
+                    ? "TRIPPED"
+                    : "OK"
+              }
+              icon={
+                s?.circuit_breaker_tripped ? (
+                  <ShieldAlert className="h-4 w-4" />
+                ) : (
+                  <ShieldCheck className="h-4 w-4" />
+                )
+              }
+              loading={sumLoading}
+              className={cn(
+                s?.circuit_breaker_tripped && "border-red-500/50 bg-red-950/20",
+              )}
+            />
+          </>
+        )}
       </div>
 
       {/* PnL chart */}
@@ -118,9 +212,9 @@ export function PortfolioPage() {
           <ResponsiveContainer width="100%" height={200}>
             <AreaChart data={pnlItems}>
               <defs>
-                <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="oklch(0.72 0.19 155)" stopOpacity={0.3} />
-                  <stop offset="100%" stopColor="oklch(0.72 0.19 155)" stopOpacity={0} />
+                <linearGradient id={`pnlGrad-${mode}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={chartColor} stopOpacity={0.3} />
+                  <stop offset="100%" stopColor={chartColor} stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="oklch(1 0 0 / 5%)" />
@@ -147,8 +241,8 @@ export function PortfolioPage() {
               <Area
                 type="monotone"
                 dataKey="cumulative_pnl_usd"
-                stroke="oklch(0.72 0.19 155)"
-                fill="url(#pnlGrad)"
+                stroke={chartColor}
+                fill={`url(#pnlGrad-${mode})`}
                 strokeWidth={2}
               />
             </AreaChart>
@@ -202,13 +296,20 @@ export function PortfolioPage() {
                       {(p.symbol as string) ?? "???"}
                     </span>
                     <AddressBadge address={p.token_address as string} />
+                    {/* REAL badge for on-chain positions */}
+                    {p.is_paper === false && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                        REAL
+                      </span>
+                    )}
                     {p.close_reason ? (
                       <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
                         {String(p.close_reason)}
                       </span>
                     ) : null}
                   </div>
-                  <div className="mt-0.5 flex gap-3 text-xs text-muted-foreground font-data">
+                  <div className="mt-0.5 flex flex-wrap gap-3 text-xs text-muted-foreground font-data">
                     <span>{formatSol(p.amount_sol_invested as number)}</span>
                     <span>
                       Entry: {formatUsd(p.entry_price as number)}
@@ -219,6 +320,17 @@ export function PortfolioPage() {
                       </span>
                     )}
                     <span>{timeAgo((p.opened_at ?? p.closed_at) as string)}</span>
+                    {typeof p.tx_hash === "string" && p.tx_hash && (
+                      <a
+                        href={`https://solscan.io/tx/${p.tx_hash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-0.5 text-primary/70 hover:text-primary transition-colors"
+                      >
+                        tx
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
                   </div>
                 </div>
                 <div className="text-right">

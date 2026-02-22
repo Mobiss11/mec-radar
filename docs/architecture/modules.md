@@ -125,6 +125,17 @@
 | `metrics.py` | `metrics` | System metrics (Prometheus-compatible) |
 | `paper_trader.py` | `PaperTrader` | Auto paper trading engine (partial unique index prevents duplicate open positions) |
 
+## Trading Engine (`src/trading/`)
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `real_trader.py` | `RealTrader` | Real trading — Jupiter swaps, position lifecycle |
+| `wallet.py` | `SolanaWallet` | Keypair management, SOL/SPL balance, ATA derivation |
+| `jupiter_swap.py` | `JupiterSwapClient` | Swap execution pipeline (quote→sign→send→confirm) |
+| `risk_manager.py` | `RiskManager` | Pre-trade safety (balance, exposure, liquidity) |
+| `risk_manager.py` | `TradingCircuitBreaker` | Auto-pause after N failures, cooldown timer |
+| `close_conditions.py` | `check_close_conditions()` | Shared pure function for TP/SL/trailing/timeout |
+
 ## Telegram Bot (`src/bot/`)
 
 | File | Function | Purpose |
@@ -163,7 +174,7 @@ Built to `frontend/dist/`, served by FastAPI as static files.
 | Overview | `/` | Stat cards, connection status dots, pipeline sparkline |
 | Tokens | `/tokens` | DataTable with search/filters, token detail sheet |
 | Signals | `/signals` | Tabs by status, score badge, reasons preview |
-| Portfolio | `/portfolio` | PnL chart, positions table, summary cards |
+| Portfolio | `/portfolio` | PnL chart, positions table, summary cards, paper/real/all tabs, wallet balance |
 | Settings | `/settings` | Feature flag toggles, paper trader params, API status |
 | Analytics | `/analytics` | Score histogram, signal pie, discovery by source |
 

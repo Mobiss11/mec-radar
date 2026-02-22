@@ -105,8 +105,8 @@ export const signals = {
 
 /* Portfolio */
 export const portfolio = {
-  summary: () =>
-    request<Record<string, unknown>>("/portfolio/summary"),
+  summary: (mode = "paper") =>
+    request<Record<string, unknown>>(`/portfolio/summary?mode=${mode}`),
   positions: (params: Record<string, string | number>) => {
     const qs = new URLSearchParams()
     for (const [k, v] of Object.entries(params)) {
@@ -118,9 +118,9 @@ export const portfolio = {
   },
   positionDetail: (id: number) =>
     request<Record<string, unknown>>(`/portfolio/positions/${id}`),
-  pnlHistory: (days = 30) =>
+  pnlHistory: (days = 30, mode = "paper") =>
     request<{ items: Array<Record<string, unknown>> }>(
-      `/portfolio/pnl-history?days=${days}`,
+      `/portfolio/pnl-history?days=${days}&mode=${mode}`,
     ),
 }
 

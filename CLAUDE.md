@@ -1,8 +1,8 @@
 # сcrypto
 
 ## О проекте
-Async Python platform for detecting, scoring and paper-trading Solana memecoins.
-Integrates 20+ data sources, runs an 11-stage enrichment pipeline, generates trading signals (54 rules), and auto paper-trades.
+Async Python platform for detecting, scoring and trading Solana memecoins (paper + real via Jupiter swaps).
+Integrates 20+ data sources, runs an 11-stage enrichment pipeline, generates trading signals (54 rules), and auto-trades (paper + real on-chain).
 
 ## Стек
 - Backend: Python 3.12, asyncio, httpx, websockets, grpcio
@@ -26,12 +26,19 @@ Integrates 20+ data sources, runs an 11-stage enrichment pipeline, generates tra
 - [Phase 23 Audit Fixes](docs/analysis/phase23-audit-fixes.md) — SharedRateLimiter (Birdeye), signal dedup, prescan Redis persistence, GMGN gradual recovery, SolSniffer atomic cap, gRPC timeouts, scoring v2/v3 alignment, PRE_SCAN timeout, trailing stop gap fix
 - [Phase 24 Audit Fixes](docs/analysis/phase24-audit-fixes.md) — Signal atomic upsert (pg ON CONFLICT), alert dedup (address,action), entry slippage, DB indexes, GMGN timeout, worker loop resilience
 - [Phase 25 Production Fixes](docs/analysis/phase25-production-fixes.md) — Stage starvation fix, MintInfo deserialization, signal calibration (first buy signals + paper trades), portfolio is_paper type fix, dashboard API
+- Phase 27: Real trading engine (Jupiter swaps, wallet, risk manager, circuit breaker, 108 tests)
+- Phase 28: Dashboard real trading UI (Paper/Real/All tabs, wallet balance, tx links), documentation updates
 
 ## Key Paths
 - `src/parsers/worker.py` — main event loop (WS clients + enrichment pipeline, ~3000 lines)
 - `src/parsers/scoring.py` / `scoring_v3.py` — token scoring v2/v3 (0-100, A/B comparison)
 - `src/parsers/signals.py` — 54 signal rules → strong_buy/buy/watch/avoid
-- `src/parsers/paper_trader.py` — auto paper trading (3x TP, -50% SL, 8h timeout, trailing stop)
+- `src/parsers/paper_trader.py` — auto paper trading (2x TP, -50% SL, 8h timeout, trailing stop)
+- `src/trading/real_trader.py` — real trading engine (Jupiter swaps, risk manager, circuit breaker)
+- `src/trading/wallet.py` — Solana wallet (keypair, balance, ATA)
+- `src/trading/jupiter_swap.py` — Jupiter V6 swap execution pipeline
+- `src/trading/risk_manager.py` — pre-trade risk checks + circuit breaker
+- `src/trading/close_conditions.py` — shared close logic (TP/SL/trailing, paper + real)
 - `src/parsers/persistence.py` — all DB write operations
 - `src/parsers/enrichment_queue.py` — Redis-backed priority queue
 - `src/parsers/alerts.py` — Telegram alert dispatch (signals + paper trades)

@@ -3,7 +3,7 @@
 ## System Purpose
 Async Python platform for detecting and scoring Solana memecoins.
 Integrates 20+ data sources, runs an 11-stage enrichment pipeline,
-generates trading signals, and paper-trades automatically.
+generates trading signals, and trades automatically (paper + real on-chain via Jupiter).
 
 ## Core Data Flow
 ```
@@ -18,8 +18,9 @@ Token Discovery        Enrichment Pipeline        Signal Generation
 └──────────────┘             ▼                           │
                       ┌──────────────┐           ┌───────▼───────┐
                       │ PostgreSQL   │           │ Paper Trader  │
-                      │ Redis cache  │           │ TG Alerts     │
-                      └──────────────┘           └───────────────┘
+                      │ Redis cache  │           │ Real Trader   │
+                      └──────────────┘           │ TG Alerts     │
+                                                 └───────────────┘
 ```
 
 ## Key Components
@@ -78,14 +79,23 @@ Signals generated at INITIAL and MIN_5 stages. Signal decay TTL (based on `updat
 - buy → watch after 6h
 - watch → expired after 12h
 
-### Paper Trading
+### Trading Engine (Dual Mode)
+
+#### Paper Trading
+- Virtual positions with simulated fills
 - Volume-weighted entry: strong_buy = 1.5x base SOL, buy = 1.0x
 - Real-time price updates via Birdeye multi-price (15s interval), Jupiter fallback for missing tokens
-- SOL/USD price feed via Birdeye (primary, 60s cache), Jupiter fallback
-- Trailing stop: after 2x, close if 30% drawdown from max
-- Early stop: -20% in first 30 minutes
-- Take profit: 3x, Stop loss: -50%, Timeout: 8h
+- TP: 2x, SL: -50%, Trailing: 20% after 1.5x, Timeout: 8h
 - Slippage estimation: haircut if exit > 2% of liquidity (both enrichment + price loop paths)
+
+#### Real Trading (Jupiter Swaps)
+- Live on-chain execution via Jupiter V6 API
+- Budget: 0.05 SOL/trade, max 3 positions, max 0.5 SOL exposure
+- 6-layer safety: kill switches, wallet validation, risk manager, circuit breaker, exposure cap, fee reserve
+- Circuit breaker: 3 failures → 30 min pause + Telegram alert
+- Shared close conditions with paper (TP/SL/trailing/timeout) via `close_conditions.py`
+- All trades with real tx_hash, viewable on Solscan
+- SOL/USD price feed via Birdeye (primary, 60s cache), Jupiter fallback
 - Telegram alerts on open/close via AlertDispatcher
 
 ### Telegram Alerts
@@ -178,3 +188,5 @@ Signals generated at INITIAL and MIN_5 stages. Signal decay TTL (based on `updat
 - **Phase 24** (2026-02-20): Signal atomic upsert (pg ON CONFLICT), alert dedup (address,action), entry slippage, DB indexes, GMGN timeout, worker loop resilience
 - **Phase 25** (2026-02-21): Stage starvation fix (queue FIFO within priority), MintInfo dict→object deserialization, signal calibration (rugcheck -4→-2, llm -3→-1, mutable -2→-1), portfolio is_paper type fix, web dashboard (FastAPI + React)
 - **Phase 26** (2026-02-21): Production deployment — GitHub repo (Mobiss11/mec-radar), Hetzner CCX23 server (178.156.247.90, Ubuntu 24.04, 4vCPU/16GB), systemd service, PostgreSQL data migration, firewall (UFW)
+- **Phase 27** (2026-02-22): Real trading engine — `src/trading/` module: RealTrader, SolanaWallet, JupiterSwapClient, RiskManager, TradingCircuitBreaker, close_conditions. 108 new tests. Composition (not inheritance from PaperTrader). Jupiter V6 swap pipeline, 6-layer safety. Portfolio API `mode=paper|real|all` on all endpoints
+- **Phase 28** (2026-02-22): Dashboard real trading UI — Paper/Real/All mode tabs, wallet balance + circuit breaker stat cards, REAL badges on positions, tx_hash Solscan links, mode-aware chart colors. Documentation updates across CLAUDE.md, overview.md, modules.md, MEMORY.md
