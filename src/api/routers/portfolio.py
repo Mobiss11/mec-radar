@@ -325,7 +325,7 @@ async def close_position(
             )
         from src.parsers.sol_price import get_sol_price_safe
 
-        sol_price = await get_sol_price_safe()
+        sol_price = get_sol_price_safe()
         ok = await trader._execute_close(
             session, pos, "manual_close", price,
             liquidity_usd=None, sol_price_usd=sol_price,
