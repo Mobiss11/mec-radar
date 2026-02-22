@@ -1007,7 +1007,7 @@ async def _enrichment_worker(
                     rpc_url = settings.helius_rpc_url or settings.solana_rpc_url
                     prescan_result = await _run_prescan(
                         task, rpc_url=rpc_url, jupiter=jupiter,
-                        goplus=goplus,
+                        goplus=goplus, birdeye=birdeye,
                     )
                     if prescan_result is None:
                         # Rejected — don't schedule INITIAL
@@ -1084,11 +1084,13 @@ async def _run_prescan(
     rpc_url: str = "",
     jupiter: JupiterClient | None = None,
     goplus: GoPlusClient | None = None,
+    birdeye: BirdeyeClient | None = None,
 ) -> EnrichmentTask | None:
-    """Phase 12/29: PRE_SCAN — instant reject obvious scams (<2s).
+    """Phase 12/29/30: PRE_SCAN — instant reject obvious scams + microcap junk (<2s).
 
     Runs mint account parsing + Jupiter sell simulation + GoPlus honeypot check
-    in parallel.  Returns modified task with prescan_risk_boost if passed,
+    + Birdeye fast price/liq check in parallel.
+    Returns modified task with prescan_risk_boost if passed,
     or None if hard-rejected (don't schedule INITIAL).
     """
     mint = task.address
@@ -1099,6 +1101,7 @@ async def _run_prescan(
     mint_info: MintInfo | None = None
     sell_sim = None
     goplus_report = None
+    birdeye_overview = None
 
     coros: list = []
     coro_labels: list[str] = []
@@ -1111,6 +1114,9 @@ async def _run_prescan(
     if goplus:
         coros.append(goplus.get_token_security(mint))
         coro_labels.append("goplus")
+    if birdeye:
+        coros.append(birdeye.get_token_overview(mint))
+        coro_labels.append("birdeye")
 
     if coros:
         results = await asyncio.wait_for(
@@ -1130,6 +1136,21 @@ async def _run_prescan(
             elif label == "goplus":
                 if not isinstance(r, Exception) and r is not None:
                     goplus_report = r
+            elif label == "birdeye":
+                if not isinstance(r, Exception) and r is not None:
+                    birdeye_overview = r
+                else:
+                    logger.debug(f"[PRE_SCAN] Birdeye overview failed for {mint[:12]}: {r}")
+
+    # --- Hard reject: microcap / zero liquidity (Phase 30) ---
+
+    if birdeye_overview is not None:
+        mcap = float(birdeye_overview.marketCap or 0)
+        liq = float(birdeye_overview.liquidity or 0)
+        if mcap > 0 and mcap < settings.prescan_min_mcap_usd:
+            reject_reasons.append(f"low_mcap(${mcap:,.0f}<${settings.prescan_min_mcap_usd:,.0f})")
+        if liq < settings.prescan_min_liquidity_usd:
+            reject_reasons.append(f"low_liq(${liq:,.0f}<${settings.prescan_min_liquidity_usd:,.0f})")
 
     # --- Hard reject conditions ---
 
@@ -1184,9 +1205,12 @@ async def _run_prescan(
         if sell_sim and sell_sim.price_impact_pct and sell_sim.price_impact_pct > 30:
             flags.append(f"high_impact_{sell_sim.price_impact_pct:.0f}%")
 
+    mcap_str = ""
+    if birdeye_overview is not None:
+        mcap_str = f", mcap=${float(birdeye_overview.marketCap or 0):,.0f}, liq=${float(birdeye_overview.liquidity or 0):,.0f}"
     logger.info(
         f"[PRE_SCAN] {mint[:12]} PASSED "
-        f"(risk_boost={risk_boost}, flags={flags or 'none'})"
+        f"(risk_boost={risk_boost}, flags={flags or 'none'}{mcap_str})"
     )
     # Return task with prescan_risk_boost + mint_info/sell_sim for INITIAL to use
     return EnrichmentTask(

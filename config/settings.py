@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     # Creator trace
     default_creator_risk: int = 25
 
+    # PRE_SCAN Birdeye fast check — reject microcap junk before expensive INITIAL
+    prescan_min_mcap_usd: float = 5000.0     # Hard reject if MCap < $5K
+    prescan_min_liquidity_usd: float = 100.0  # Hard reject if liquidity < $100
+
     # Phase 29: API credit optimization — tunable Helius/Vybe parameters
     convergence_max_buyers: int = 10  # was 15 — each buyer = 2 Helius RPC calls
     funding_trace_max_hops: int = 2   # was 3 — each hop = 6 Helius RPC calls
