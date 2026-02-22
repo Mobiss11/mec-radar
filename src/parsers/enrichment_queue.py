@@ -185,44 +185,48 @@ class PersistentEnrichmentQueue:
             await asyncio.sleep(1.0)
 
     async def _try_redis_get(self) -> EnrichmentTask | None:
-        """Try to pop the highest-priority ready task from Redis."""
-        now = asyncio.get_event_loop().time()
-        # Max score covers all ready tasks: priority 1, scheduled_at <= now
-        max_score = 1e12 + now
+        """Try to pop the highest-priority ready task from Redis.
 
-        results = await self._redis.zrangebyscore(
-            REDIS_KEY_QUEUE, "-inf", max_score, start=0, num=1
+        Score = priority * 1e12 + stage_bucket * 0.5e12 + scheduled_at.
+        We scan up to 50 candidates from the front of the sorted set and pick
+        the first one whose scheduled_at <= now.  This avoids the starvation
+        problem where future-scheduled bucket-0 tasks (HOUR_1, MIN_30) block
+        ready bucket-1 tasks (PRE_SCAN) that sit further back in the set.
+        """
+        now = asyncio.get_event_loop().time()
+
+        # Fetch a batch of candidates (lowest scores first).
+        # 50 is enough: at most ~20-30 future tasks sit ahead of ready ones.
+        results = await self._redis.zrange(
+            REDIS_KEY_QUEUE, 0, 49, withscores=True,
         )
         if not results:
             return None
 
-        tid = results[0]
+        for tid, score in results:
+            # Extract scheduled_at from score
+            priority = int(score // 1e12)
+            remainder = score - priority * 1e12
+            stage_bucket = int(remainder // 0.5e12)
+            scheduled_at = remainder - stage_bucket * 0.5e12
 
-        # Check if this task is actually ready
-        score = await self._redis.zscore(REDIS_KEY_QUEUE, tid)
-        if score is None:
-            return None
+            if scheduled_at > now + 2.0:
+                continue  # Not ready — skip, try next candidate
 
-        priority = int(score // 1e12)
-        scheduled_at = score - priority * 1e12
+            # This task is ready (or within 2s). Pop atomically.
+            removed = await self._redis.zrem(REDIS_KEY_QUEUE, tid)
+            if not removed:
+                continue  # Another worker got it — try next
 
-        if scheduled_at > now:
-            # Not ready yet — only return if it'll be ready within 2s
-            if scheduled_at - now > 2.0:
-                return None
+            task_json = await self._redis.hget(REDIS_KEY_TASKS, tid)
+            await self._redis.hdel(REDIS_KEY_TASKS, tid)
 
-        # Pop atomically
-        removed = await self._redis.zrem(REDIS_KEY_QUEUE, tid)
-        if not removed:
-            return None  # Another worker got it
+            if not task_json:
+                continue
 
-        task_json = await self._redis.hget(REDIS_KEY_TASKS, tid)
-        await self._redis.hdel(REDIS_KEY_TASKS, tid)
+            return _dict_to_task(json.loads(task_json))
 
-        if not task_json:
-            return None
-
-        return _dict_to_task(json.loads(task_json))
+        return None  # No ready tasks in the first 50 candidates
 
     async def qsize(self) -> int:
         """Approximate queue size."""

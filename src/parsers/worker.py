@@ -954,15 +954,13 @@ async def _enrichment_worker(
         try:
             task = await enrichment_queue.get()
 
-            # Wait until scheduled time, but in short bursts so migrations
-            # can interrupt if they arrive during a long wait
+            # _try_redis_get already filters by scheduled_at <= now + 2s,
+            # so tasks returned here are ready or nearly ready.
             now = asyncio.get_event_loop().time()
             delay = task.scheduled_at - now
             if delay > 0:
-                await enrichment_queue.put(task)
-                await enrichment_queue.task_done()
-                await asyncio.sleep(min(delay, 2.0))
-                continue
+                # Small wait for near-ready tasks (< 2s)
+                await asyncio.sleep(delay)
 
             # Staleness check: discard tasks that are too old to be useful
             # PRE_SCAN: 5 min, INITIAL: 15 min, later stages: 3x their offset
