@@ -100,12 +100,13 @@ def evaluate_signals(
     # All 3 real rugs (Mr., HAPEPE, Conor) + YABOOZARU dump caught.
     # Zero false positives on successful trades > $30K liq.
 
-    # HG1: Minimum liquidity — tokens with < $30K liq have 80% rug rate
-    # in our data. ALL 3 real rugs had liq $19-23K. All winners had > $43K.
-    if 0 < liq < 30_000:
+    # HG1: Minimum liquidity — tokens with < $21K liq have high rug rate
+    # in our data. ALL 3 real rugs had liq $19-23K. Lowered from $30K to $21K
+    # to capture tokens in $21-30K range that may still pump.
+    if 0 < liq < 21_000:
         gate_rule = SignalRule(
             "low_liquidity_gate", -10,
-            f"Hard gate: liquidity ${liq:,.0f} < $30K (high rug risk)",
+            f"Hard gate: liquidity ${liq:,.0f} < $21K (high rug risk)",
         )
         return SignalResult(
             rules_fired=[gate_rule],
