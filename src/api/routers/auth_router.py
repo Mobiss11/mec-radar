@@ -49,9 +49,9 @@ async def login(request: Request, body: LoginRequest, response: Response) -> Log
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
         )
-    token = create_access_token(body.username)
+    token, payload = create_access_token(body.username)
     set_auth_cookie(response, token)
-    csrf = generate_csrf_token({"sub": body.username})
+    csrf = generate_csrf_token(payload)
     return LoginResponse(username=body.username, csrf_token=csrf)
 
 

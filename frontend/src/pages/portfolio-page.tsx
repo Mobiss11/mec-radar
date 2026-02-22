@@ -101,7 +101,8 @@ export function PortfolioPage() {
   const handleClose = useCallback(async (positionId: number) => {
     setClosingId(positionId)
     try {
-      const token = csrfToken ?? (await refreshCsrf())
+      // Always refresh CSRF before mutating request (jti must match current JWT)
+      const token = await refreshCsrf()
       await portfolio.closePosition(positionId, token)
       setConfirmId(null)
       setRefreshKey((k) => k + 1)

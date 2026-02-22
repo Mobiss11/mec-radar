@@ -37,8 +37,8 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-def create_access_token(username: str) -> str:
-    """Create a signed JWT."""
+def create_access_token(username: str) -> tuple[str, dict[str, Any]]:
+    """Create a signed JWT.  Returns (encoded_token, payload)."""
     now = datetime.now(UTC)
     payload: dict[str, Any] = {
         "sub": username,
@@ -46,7 +46,7 @@ def create_access_token(username: str) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     }
-    return jwt.encode(payload, _get_secret(), algorithm=ALGORITHM)
+    return jwt.encode(payload, _get_secret(), algorithm=ALGORITHM), payload
 
 
 def decode_token(token: str) -> dict[str, Any]:
