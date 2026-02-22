@@ -58,6 +58,12 @@ class RealTrader:
         self._stop_loss_pct = stop_loss_pct
         self._timeout_hours = timeout_hours
         self._alerts = alert_dispatcher
+        # Track consecutive sell failures per position for auto force-close
+        self._sell_fail_count: dict[int, int] = {}
+        # Max sell attempts before force-closing position as total loss
+        self._max_sell_attempts: int = 3
+        # Escalating slippage: 5% → 15% → 25%
+        self._slippage_escalation: list[int] = [500, 1500, 2500]
 
     async def on_signal(
         self,
@@ -302,8 +308,47 @@ class RealTrader:
         """Execute sell swap + close position in DB.
 
         Returns True on success. On failure, position stays open for retry on next cycle.
+
+        Sell protection flow:
+        1. First attempt: default slippage (5%)
+        2. Second attempt: escalated slippage (15%)
+        3. Third attempt: max slippage (25%)
+        4. After max_sell_attempts failures: auto force-close as total loss
+           (pool dead / rug pull — tokens likely worthless)
         """
-        if self._circuit.is_tripped:
+        pos_id = pos.id
+        _sym = pos.symbol or pos.token_address[:12]
+        fail_count = self._sell_fail_count.get(pos_id, 0)
+
+        # Auto force-close after max attempts (pool dead / rug pull)
+        if fail_count >= self._max_sell_attempts:
+            logger.warning(
+                f"[REAL] Auto force-close {_sym} after {fail_count} failed sells — "
+                f"pool likely dead"
+            )
+            pos.status = "closed"
+            pos.close_reason = f"{reason}+sell_failed"
+            pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
+            pos.current_price = price
+            pos.pnl_pct = Decimal("-100")
+            self._sell_fail_count.pop(pos_id, None)
+            # Alert
+            if self._alerts:
+                try:
+                    await self._alerts.send_real_error(
+                        f"⚠️ Auto force-closed {_sym}\n"
+                        f"Reason: {fail_count} consecutive sell failures\n"
+                        f"Pool likely dead (rug pull / no liquidity)\n"
+                        f"Position closed as -100% loss"
+                    )
+                except Exception:
+                    pass
+            return True
+
+        # Circuit breaker bypass for urgent closes (rug, stop_loss, early_stop)
+        # and retries (fail_count > 0)
+        urgent_reasons = {"rug", "stop_loss", "early_stop", "timeout"}
+        if self._circuit.is_tripped and reason not in urgent_reasons and fail_count == 0:
             logger.warning(
                 f"[REAL] Circuit breaker active, deferring close of {pos.token_address[:12]}"
             )
@@ -317,37 +362,49 @@ class RealTrader:
                 f"[REAL] No token balance for {pos.token_address[:12]}, "
                 f"closing position without sell (tokens may have been transferred)"
             )
-            # Close position without sell trade — tokens are gone
             pos.status = "closed"
             pos.close_reason = f"{reason}+no_balance"
             pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
             pos.current_price = price
+            self._sell_fail_count.pop(pos_id, None)
             return True
 
+        # Escalating slippage: more attempts = higher slippage tolerance
+        slippage_idx = min(fail_count, len(self._slippage_escalation) - 1)
+        slippage_bps = self._slippage_escalation[slippage_idx]
+        if fail_count > 0:
+            logger.info(
+                f"[REAL] Sell retry #{fail_count + 1} for {_sym} "
+                f"with escalated slippage: {slippage_bps}bps"
+            )
+
         # Execute sell swap
-        result = await self._swap.sell_token(pos.token_address, token_balance_raw)
+        result = await self._swap.sell_token(
+            pos.token_address, token_balance_raw, slippage_bps=slippage_bps,
+        )
 
         if not result.success:
+            self._sell_fail_count[pos_id] = fail_count + 1
             self._circuit.record_failure(result.error or "Sell failed")
             logger.warning(
-                f"[REAL] Sell failed for {pos.token_address[:12]}: {result.error}. "
-                f"Position stays open, will retry."
+                f"[REAL] Sell failed for {_sym}: {result.error} "
+                f"(attempt {fail_count + 1}/{self._max_sell_attempts}). "
+                f"{'Will auto force-close next cycle.' if fail_count + 1 >= self._max_sell_attempts else 'Will retry with higher slippage.'}"
             )
-            # Alert on circuit breaker trip
-            if self._circuit.is_tripped and self._alerts:
+            # Alert on escalating failures
+            if fail_count + 1 >= self._max_sell_attempts and self._alerts:
                 try:
                     await self._alerts.send_real_error(
-                        f"Circuit breaker tripped during SELL.\n"
-                        f"Token: {pos.symbol or pos.token_address[:12]}\n"
-                        f"Reason: {reason}\n"
+                        f"🚨 Sell failed {fail_count + 1}x for {_sym}\n"
                         f"Error: {result.error}\n"
-                        f"⚠️ Position still OPEN — manual intervention may be needed"
+                        f"Will auto force-close on next cycle (total loss)"
                     )
                 except Exception:
                     pass
             return False
 
         self._circuit.record_success()
+        self._sell_fail_count.pop(pos_id, None)
 
         # Close position in DB
         pos.status = "closed"
@@ -379,15 +436,14 @@ class RealTrader:
 
         pnl = f"{pos.pnl_pct:+.1f}%" if pos.pnl_pct else "?"
         logger.info(
-            f"[REAL] Closed {pos.symbol or pos.token_address[:12]} "
-            f"reason={reason} P&L={pnl} tx={result.tx_hash}"
+            f"[REAL] Closed {_sym} reason={reason} P&L={pnl} tx={result.tx_hash}"
         )
 
         # Telegram alert
         if self._alerts:
             try:
                 await self._alerts.send_real_close(
-                    symbol=pos.symbol or pos.token_address[:12],
+                    symbol=_sym,
                     address=pos.token_address,
                     entry_price=float(pos.entry_price or 0),
                     exit_price=float(price),

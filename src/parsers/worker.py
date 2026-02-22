@@ -681,7 +681,7 @@ async def run_parser() -> None:
                     name="real_price",
                 )
             )
-            logger.info("[REAL] Real trading real-time prices enabled (15s)")
+            logger.info("[REAL] Real trading real-time prices enabled (10s)")
         tasks.append(
             asyncio.create_task(
                 _real_sweep_loop(real_trader),
@@ -3557,15 +3557,18 @@ async def _real_price_loop(
     birdeye: "BirdeyeClient | None" = None,
     jupiter: "JupiterClient | None" = None,
 ) -> None:
-    """Real-time price updates for open real positions.
+    """Real-time price updates for open real positions (10s cycle).
 
     Same pattern as _paper_price_loop but for is_paper=0 positions.
     Triggers take_profit/stop_loss sell execution via Jupiter swap.
+    Faster cycle than paper (10s vs 15s) because real money is at stake.
     """
     from sqlalchemy import select as sa_select
 
     from src.db.database import async_session_factory
     from src.models.trade import Position
+
+    REAL_PRICE_INTERVAL = 10  # seconds — faster than paper for rug protection
 
     await asyncio.sleep(30)
 
@@ -3581,7 +3584,7 @@ async def _real_price_loop(
                 positions = list(result.scalars().all())
 
             if not positions:
-                await asyncio.sleep(15)
+                await asyncio.sleep(REAL_PRICE_INTERVAL)
                 continue
 
             addresses = list({p.token_address for p in positions})
@@ -3612,7 +3615,7 @@ async def _real_price_loop(
                     logger.debug(f"[REAL] Jupiter batch fallback failed: {e}")
 
             if not token_prices:
-                await asyncio.sleep(15)
+                await asyncio.sleep(REAL_PRICE_INTERVAL)
                 continue
 
             from src.parsers.sol_price import get_sol_price
@@ -3659,7 +3662,7 @@ async def _real_price_loop(
         except Exception as e:
             logger.debug(f"[REAL] Price loop error: {e}")
 
-        await asyncio.sleep(15)
+        await asyncio.sleep(REAL_PRICE_INTERVAL)
 
 
 async def _real_sweep_loop(real_trader: "RealTrader") -> None:
