@@ -342,6 +342,15 @@ export function PortfolioPage() {
                       </span>
                     )}
                     <span>{timeAgo((p.opened_at ?? p.closed_at) as string)}</span>
+                    <a
+                      href={`https://gmgn.ai/sol/token/${p.token_address}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-0.5 text-primary/70 hover:text-primary transition-colors"
+                    >
+                      gmgn
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
                     {typeof p.tx_hash === "string" && p.tx_hash && (
                       <a
                         href={`https://solscan.io/tx/${p.tx_hash}`}

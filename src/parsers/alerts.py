@@ -170,6 +170,8 @@ class AlertDispatcher:
             f"Entry: ${price:.8g}\n"
             f"Size: {sol_amount} SOL\n"
             f"Signal: {action.upper()}\n\n"
+            f'<a href="https://gmgn.ai/sol/token/{address}">GMGN</a>'
+            f' · <a href="https://solscan.io/token/{address}">Solscan</a>\n'
             f"<code>{address}</code>"
         )
         logger.info(f"[PAPER] Opened {symbol or address[:12]} @ ${price:.8g} ({sol_amount} SOL)")
@@ -193,6 +195,8 @@ class AlertDispatcher:
             f"Exit: ${exit_price:.8g}\n"
             f"P&L: <b>{pnl_pct:+.1f}%</b>\n"
             f"Reason: {reason}\n\n"
+            f'<a href="https://gmgn.ai/sol/token/{address}">GMGN</a>'
+            f' · <a href="https://solscan.io/token/{address}">Solscan</a>\n'
             f"<code>{address}</code>"
         )
         logger.info(
@@ -220,7 +224,9 @@ class AlertDispatcher:
             f"Entry: ${price:.8g}\n"
             f"Size: {sol_amount:.4f} SOL\n"
             f"Signal: {action.upper()}\n"
-            f"TX: <code>{tx_hash[:16]}...</code>\n\n"
+            f'TX: <a href="https://solscan.io/tx/{tx_hash}">{tx_hash[:16]}...</a>\n\n'
+            f'<a href="https://gmgn.ai/sol/token/{address}">GMGN</a>'
+            f' · <a href="https://solscan.io/token/{address}">Solscan</a>\n'
             f"<code>{address}</code>"
         )
         logger.info(
@@ -248,7 +254,9 @@ class AlertDispatcher:
             f"Exit: ${exit_price:.8g}\n"
             f"P&L: <b>{pnl_pct:+.1f}%</b>\n"
             f"Reason: {reason}\n"
-            f"TX: <code>{tx_hash[:16]}...</code>\n\n"
+            f'TX: <a href="https://solscan.io/tx/{tx_hash}">{tx_hash[:16]}...</a>\n\n'
+            f'<a href="https://gmgn.ai/sol/token/{address}">GMGN</a>'
+            f' · <a href="https://solscan.io/token/{address}">Solscan</a>\n'
             f"<code>{address}</code>"
         )
         logger.info(
@@ -364,6 +372,7 @@ def _format_telegram_message(alert: TokenAlert) -> str:
     )
 
     safe_name = html_mod.escape(alert.symbol or alert.token_address[:12])
+    addr = alert.token_address
     return (
         f"{emoji} <b>{alert.action.upper()}</b>: "
         f"<b>{safe_name}</b>\n\n"
@@ -372,5 +381,7 @@ def _format_telegram_message(alert: TokenAlert) -> str:
         f"Liquidity: {liq}\n"
         f"Source: {alert.source or '?'}\n\n"
         f"<b>Reasons:</b>\n{reasons_lines}\n\n"
-        f"<code>{alert.token_address}</code>"
+        f'<a href="https://gmgn.ai/sol/token/{addr}">GMGN</a>'
+        f' · <a href="https://solscan.io/token/{addr}">Solscan</a>\n'
+        f"<code>{addr}</code>"
     )
