@@ -331,6 +331,9 @@ class RealTrader:
             pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
             pos.current_price = price
             pos.pnl_pct = Decimal("-100")
+            # Actual PnL: lost entire investment (no sell executed)
+            _sol_usd = Decimal(str(sol_price_usd))
+            pos.pnl_usd = -(pos.amount_sol_invested or Decimal("0")) * _sol_usd
             self._sell_fail_count.pop(pos_id, None)
             # Alert
             if self._alerts:
@@ -366,6 +369,10 @@ class RealTrader:
             pos.close_reason = f"{reason}+no_balance"
             pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
             pos.current_price = price
+            # Actual PnL: lost entire investment (no tokens to sell)
+            pos.pnl_pct = Decimal("-100")
+            _sol_usd = Decimal(str(sol_price_usd))
+            pos.pnl_usd = -(pos.amount_sol_invested or Decimal("0")) * _sol_usd
             self._sell_fail_count.pop(pos_id, None)
             return True
 
@@ -418,6 +425,7 @@ class RealTrader:
             exit_sol = result.output_amount / Decimal(str(LAMPORTS_PER_SOL))
 
         # Create sell trade with real data
+        sell_fee = result.fee_sol or Decimal("0")
         trade = Trade(
             signal_id=pos.signal_id,
             token_id=pos.token_id,
@@ -427,16 +435,29 @@ class RealTrader:
             amount_token=Decimal(str(token_balance_raw)),
             price=price,
             slippage_pct=Decimal(str(result.price_impact_pct or 0)),
-            fee_sol=result.fee_sol,
+            fee_sol=sell_fee,
             tx_hash=result.tx_hash,
             is_paper=0,
             status="filled",
         )
         session.add(trade)
 
+        # Recalculate PnL from actual blockchain data (buy SOL vs sell SOL)
+        buy_sol = pos.amount_sol_invested or Decimal("0")
+        actual_received = exit_sol - sell_fee
+        actual_pnl_sol = actual_received - buy_sol
+        _sol_usd = Decimal(str(sol_price_usd))
+        if buy_sol > 0:
+            pos.pnl_pct = actual_pnl_sol / buy_sol * 100
+        else:
+            pos.pnl_pct = Decimal("0")
+        pos.pnl_usd = actual_pnl_sol * _sol_usd
+
         pnl = f"{pos.pnl_pct:+.1f}%" if pos.pnl_pct else "?"
         logger.info(
-            f"[REAL] Closed {_sym} reason={reason} P&L={pnl} tx={result.tx_hash}"
+            f"[REAL] Closed {_sym} reason={reason} P&L={pnl} "
+            f"(bought {buy_sol} SOL, received {actual_received} SOL) "
+            f"tx={result.tx_hash}"
         )
 
         # Telegram alert

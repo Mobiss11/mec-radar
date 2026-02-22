@@ -320,15 +320,19 @@ async def close_position(
     elif force:
         # Force close — no swap, just mark as closed (rug pull / dead pool)
         from datetime import datetime, timezone
+        from src.parsers.sol_price import get_sol_price_safe
 
+        sol_usd = Decimal(str(get_sol_price_safe()))
         pos.status = "closed"
         pos.close_reason = "manual_force_close"
         pos.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         pos.pnl_pct = Decimal("-100")
+        # Actual PnL: lost entire investment (no sell executed)
+        pos.pnl_usd = -(pos.amount_sol_invested or Decimal("0")) * sol_usd
         await session.commit()
         logger.warning(
             f"[API] Force close real position {pos.symbol} id={position_id} "
-            f"(no swap — tokens likely worthless)"
+            f"(no swap — tokens likely worthless, pnl_usd={pos.pnl_usd})"
         )
     else:
         # Real close — execute Jupiter sell swap
