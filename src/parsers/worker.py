@@ -1086,10 +1086,10 @@ async def _run_prescan(
     goplus: GoPlusClient | None = None,
     birdeye: BirdeyeClient | None = None,
 ) -> EnrichmentTask | None:
-    """Phase 12/29/30: PRE_SCAN — instant reject obvious scams + microcap junk (<2s).
+    """Phase 30: Two-phase PRE_SCAN — fast Birdeye filter + scam checks.
 
-    Runs mint account parsing + Jupiter sell simulation + GoPlus honeypot check
-    + Birdeye fast price/liq check in parallel.
+    Phase 1: Birdeye overview only (~0.3s) — reject 90%+ microcap junk.
+    Phase 2: mint + jupiter + goplus (~1-2s) — only for tokens that pass phase 1.
     Returns modified task with prescan_risk_boost if passed,
     or None if hard-rejected (don't schedule INITIAL).
     """
@@ -1097,11 +1097,31 @@ async def _run_prescan(
     risk_boost = 0
     reject_reasons: list[str] = []
 
-    # Run checks in parallel
+    # --- Phase 1: Birdeye fast filter (reject ~92% of junk in <0.5s) ---
+    birdeye_overview = None
+    if birdeye:
+        try:
+            birdeye_overview = await asyncio.wait_for(
+                birdeye.get_token_overview(mint), timeout=5.0,
+            )
+        except Exception as e:
+            logger.debug(f"[PRE_SCAN] Birdeye overview failed for {mint[:12]}: {e}")
+
+    if birdeye_overview is not None:
+        mcap = float(birdeye_overview.marketCap or 0)
+        liq = float(birdeye_overview.liquidity or 0)
+        if mcap > 0 and mcap < settings.prescan_min_mcap_usd:
+            reject_reasons.append(f"low_mcap(${mcap:,.0f}<${settings.prescan_min_mcap_usd:,.0f})")
+        if liq < settings.prescan_min_liquidity_usd:
+            reject_reasons.append(f"low_liq(${liq:,.0f}<${settings.prescan_min_liquidity_usd:,.0f})")
+        if reject_reasons:
+            logger.info(f"[PRE_SCAN] {mint[:12]} REJECTED: {', '.join(reject_reasons)}")
+            return None
+
+    # --- Phase 2: Scam checks (only for tokens that passed phase 1) ---
     mint_info: MintInfo | None = None
     sell_sim = None
     goplus_report = None
-    birdeye_overview = None
 
     coros: list = []
     coro_labels: list[str] = []
@@ -1114,9 +1134,6 @@ async def _run_prescan(
     if goplus:
         coros.append(goplus.get_token_security(mint))
         coro_labels.append("goplus")
-    if birdeye:
-        coros.append(birdeye.get_token_overview(mint))
-        coro_labels.append("birdeye")
 
     if coros:
         results = await asyncio.wait_for(
@@ -1136,23 +1153,8 @@ async def _run_prescan(
             elif label == "goplus":
                 if not isinstance(r, Exception) and r is not None:
                     goplus_report = r
-            elif label == "birdeye":
-                if not isinstance(r, Exception) and r is not None:
-                    birdeye_overview = r
-                else:
-                    logger.debug(f"[PRE_SCAN] Birdeye overview failed for {mint[:12]}: {r}")
 
-    # --- Hard reject: microcap / zero liquidity (Phase 30) ---
-
-    if birdeye_overview is not None:
-        mcap = float(birdeye_overview.marketCap or 0)
-        liq = float(birdeye_overview.liquidity or 0)
-        if mcap > 0 and mcap < settings.prescan_min_mcap_usd:
-            reject_reasons.append(f"low_mcap(${mcap:,.0f}<${settings.prescan_min_mcap_usd:,.0f})")
-        if liq < settings.prescan_min_liquidity_usd:
-            reject_reasons.append(f"low_liq(${liq:,.0f}<${settings.prescan_min_liquidity_usd:,.0f})")
-
-    # --- Hard reject conditions ---
+    # --- Hard reject: scam conditions ---
 
     if mint_info and mint_info.parse_error is None:
         # Both mint + freeze authority active = very likely scam

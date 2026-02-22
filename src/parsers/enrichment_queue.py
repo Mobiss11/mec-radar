@@ -28,14 +28,19 @@ def _task_id(task: EnrichmentTask) -> str:
 
 
 def _sort_score(task: EnrichmentTask) -> float:
-    """Combine priority and scheduled_at into a single sortable score.
+    """Combine priority, stage bucket, and scheduled_at into a single sortable score.
 
-    Priority 0 (migration) sorts before priority 1 (normal).
-    Within same priority, earlier scheduled_at sorts first (FIFO).
-    No stage weighting — prevents starvation of follow-up stages (MIN_2+)
-    when PRE_SCAN/INITIAL inflow is constant.
+    Three-tier ordering:
+    1. Priority: 0 (migration) sorts before 1 (normal)  — *1e12
+    2. Stage bucket: INITIAL+ sorts before PRE_SCAN      — *0.5e12
+       PRE_SCAN is high-volume cheap filter; INITIAL+ are pre-vetted tokens
+       ready for signal generation. Without this, constant PRE_SCAN inflow
+       (~15/min) starves INITIAL tasks by 7-9 minutes.
+    3. Scheduled_at: FIFO within same bucket
     """
-    return task.priority * 1e12 + task.scheduled_at
+    # PRE_SCAN = bucket 1 (lower priority), INITIAL+ = bucket 0 (higher)
+    stage_bucket = 1 if task.stage == EnrichmentStage.PRE_SCAN else 0
+    return task.priority * 1e12 + stage_bucket * 0.5e12 + task.scheduled_at
 
 
 def _serialize_value(obj: object) -> object:

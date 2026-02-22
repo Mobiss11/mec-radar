@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     solana_rpc_url: str = ""
 
     # Enrichment workers (parallel consumers)
-    enrichment_workers: int = 3  # Number of parallel enrichment workers
+    enrichment_workers: int = 5  # Number of parallel enrichment workers (was 3)
 
     # Feature flags — token discovery
     enable_gmgn: bool = True
