@@ -1007,6 +1007,7 @@ async def _enrichment_worker(
                     rpc_url = settings.helius_rpc_url or settings.solana_rpc_url
                     prescan_result = await _run_prescan(
                         task, rpc_url=rpc_url, jupiter=jupiter,
+                        goplus=goplus,
                     )
                     if prescan_result is None:
                         # Rejected — don't schedule INITIAL
@@ -1082,11 +1083,12 @@ async def _run_prescan(
     *,
     rpc_url: str = "",
     jupiter: JupiterClient | None = None,
+    goplus: GoPlusClient | None = None,
 ) -> EnrichmentTask | None:
-    """Phase 12: PRE_SCAN — instant reject obvious scams (<2s).
+    """Phase 12/29: PRE_SCAN — instant reject obvious scams (<2s).
 
-    Runs mint account parsing + Jupiter sell simulation in parallel.
-    Returns modified task with prescan_risk_boost if passed,
+    Runs mint account parsing + Jupiter sell simulation + GoPlus honeypot check
+    in parallel.  Returns modified task with prescan_risk_boost if passed,
     or None if hard-rejected (don't schedule INITIAL).
     """
     mint = task.address
@@ -1096,30 +1098,38 @@ async def _run_prescan(
     # Run checks in parallel
     mint_info: MintInfo | None = None
     sell_sim = None
+    goplus_report = None
 
-    coros = []
+    coros: list = []
+    coro_labels: list[str] = []
     if rpc_url:
         coros.append(parse_mint_account(rpc_url, mint))
+        coro_labels.append("mint")
     if jupiter:
         coros.append(jupiter.simulate_sell(mint))
+        coro_labels.append("jupiter")
+    if goplus:
+        coros.append(goplus.get_token_security(mint))
+        coro_labels.append("goplus")
 
     if coros:
         results = await asyncio.wait_for(
             asyncio.gather(*coros, return_exceptions=True),
             timeout=10.0,
         )
-        idx = 0
-        if rpc_url:
-            r = results[idx]
-            idx += 1
-            if isinstance(r, MintInfo):
-                mint_info = r
-            else:
-                logger.debug(f"[PRE_SCAN] Mint parse error for {mint[:12]}: {r}")
-        if jupiter:
-            r = results[idx]
-            if not isinstance(r, Exception):
-                sell_sim = r
+        for i, label in enumerate(coro_labels):
+            r = results[i]
+            if label == "mint":
+                if isinstance(r, MintInfo):
+                    mint_info = r
+                else:
+                    logger.debug(f"[PRE_SCAN] Mint parse error for {mint[:12]}: {r}")
+            elif label == "jupiter":
+                if not isinstance(r, Exception):
+                    sell_sim = r
+            elif label == "goplus":
+                if not isinstance(r, Exception) and r is not None:
+                    goplus_report = r
 
     # --- Hard reject conditions ---
 
@@ -1139,6 +1149,10 @@ async def _run_prescan(
     if sell_sim and not sell_sim.sellable and sell_sim.error and not sell_sim.api_error:
         if mint_info and mint_info.mint_authority_active:
             reject_reasons.append(f"unsellable+mint_authority ({sell_sim.error})")
+
+    # Phase 29: GoPlus confirmed honeypot = instant reject
+    if goplus_report and goplus_report.is_honeypot is True:
+        reject_reasons.append("goplus_honeypot")
 
     if reject_reasons:
         logger.info(
@@ -1645,6 +1659,35 @@ async def _enrich_token(
                 except Exception as e:
                     logger.debug(f"[ENRICH] SolSniffer failed: {e}")
 
+            # --- Phase 29: Two-phase INITIAL gate ---
+            # After Batch 1, skip expensive Batch 2 (Helius deep detection, Vybe,
+            # Twitter, LLM) for tokens that are clearly trash.  Saves ~65% Helius
+            # credits with zero quality loss — these tokens would score 0-20 anyway.
+            _skip_deep = False
+            if _is_initial:
+                _b1_liq = float(birdeye_overview.liquidity) if (birdeye_overview and birdeye_overview.liquidity) else None
+                _b1_holders = birdeye_overview.holder if birdeye_overview else None
+                _b1_rugcheck_dangers = (
+                    sum(1 for r in _rugcheck_report.risks if r.level == "danger")
+                    if (_rugcheck_report and _rugcheck_report.risks) else 0
+                )
+                _ultra_low = (_b1_liq is not None and _b1_liq < 500
+                              and (_b1_holders is not None and _b1_holders < 5))
+                _confirmed_hp = goplus_is_honeypot_val is True
+                _multi_danger = _b1_rugcheck_dangers >= 4
+
+                if _ultra_low or _confirmed_hp or _multi_danger:
+                    _skip_deep = True
+                    _skip_reason = (
+                        "ultra_low_liq" if _ultra_low
+                        else "goplus_honeypot" if _confirmed_hp
+                        else f"rugcheck_{_b1_rugcheck_dangers}_dangers"
+                    )
+                    logger.info(
+                        f"[ENRICH] {task.address[:12]} skip deep detection: "
+                        f"{_skip_reason} (liq={_b1_liq}, holders={_b1_holders})"
+                    )
+
             # --- BATCH 2: Calls depending on holders / creator_address ---
             async def _check_smart_money() -> tuple[int | None, float, float | None]:
                 """Returns (smart_count, smart_quality, smart_money_weighted)."""
@@ -1676,6 +1719,7 @@ async def _enrich_token(
                     conv = await analyze_convergence(
                         helius, task.address, buyer_addrs,
                         creator_address=token.creator_address or "",
+                        max_buyers=settings.convergence_max_buyers,
                     )
                     if conv is not None and conv.converging:
                         logger.info(
@@ -1691,7 +1735,7 @@ async def _enrich_token(
                 if not (helius and holders):
                     return 0
                 try:
-                    addrs = [h.address for h in holders[:10] if h.address]
+                    addrs = [h.address for h in holders[:settings.wallet_age_max_wallets] if h.address]
                     if addrs:
                         result = await check_wallet_ages(helius, addrs)
                         if result is not None:
@@ -1742,7 +1786,8 @@ async def _enrich_token(
                     try:
                         from src.parsers.funding_trace import trace_creator_funding
                         funding = await trace_creator_funding(
-                            session, helius, token.creator_address, max_hops=3,
+                            session, helius, token.creator_address,
+                            max_hops=settings.funding_trace_max_hops,
                         )
                         if funding:
                             _funding_risk = funding.funding_risk
@@ -1873,11 +1918,11 @@ async def _enrich_token(
                 if not vybe:
                     return None
                 # Skip Vybe for tokens that failed PRE_SCAN or have high risk
-                if task.prescan_risk_boost >= 10:
+                if task.prescan_risk_boost >= settings.vybe_prescan_risk_gate:
                     return None
                 try:
                     from src.parsers.vybe.models import VybeTokenHoldersPnL
-                    result = await vybe.analyze_holders_pnl(task.address, max_holders=5)
+                    result = await vybe.analyze_holders_pnl(task.address, max_holders=settings.vybe_max_holders_pnl)
                     if result.total_holders_checked > 0:
                         logger.info(
                             f"[VYBE] {token.symbol or task.address[:12]} "
@@ -1983,112 +2028,138 @@ async def _enrich_token(
                     return None
 
             # Fire Batch 2: holder-dependent + creator-dependent + Helius + Phase 15 calls
-            (
-                _sm_result,
-                convergence_detected_val,
-                wallet_age_impact,
-                _creator_result,
-                fee_payer_sybil_val,
-                _jito_result,
-                _metaplex_result,
-                _vybe_result,
-                _twitter_result,
-                _website_result,
-                _tg_result,
-                _llm_result,
-            ) = await asyncio.wait_for(
-                asyncio.gather(
-                    _check_smart_money(),
-                    _check_convergence(),
-                    _check_wallet_ages_batch(),
-                    _run_creator_analysis(),
-                    _check_fee_payer_cluster(),
-                    _check_jito_bundle(),
-                    _check_metaplex(),
-                    _fetch_vybe_pnl(),
-                    _fetch_twitter(),
-                    _fetch_website(),
-                    _fetch_telegram(),
-                    _fetch_llm(),
-                    return_exceptions=True,
-                ),
-                timeout=45.0,
-            )
+            # Phase 29: skip entire Batch 2 for confirmed trash tokens
+            if not _skip_deep:
+                (
+                    _sm_result,
+                    convergence_detected_val,
+                    wallet_age_impact,
+                    _creator_result,
+                    fee_payer_sybil_val,
+                    _jito_result,
+                    _metaplex_result,
+                    _vybe_result,
+                    _twitter_result,
+                    _website_result,
+                    _tg_result,
+                    _llm_result,
+                ) = await asyncio.wait_for(
+                    asyncio.gather(
+                        _check_smart_money(),
+                        _check_convergence(),
+                        _check_wallet_ages_batch(),
+                        _run_creator_analysis(),
+                        _check_fee_payer_cluster(),
+                        _check_jito_bundle(),
+                        _check_metaplex(),
+                        _fetch_vybe_pnl(),
+                        _fetch_twitter(),
+                        _fetch_website(),
+                        _fetch_telegram(),
+                        _fetch_llm(),
+                        return_exceptions=True,
+                    ),
+                    timeout=45.0,
+                )
 
-            # Sanitize Batch 2: replace leaked exceptions with safe defaults
-            _batch2_names = [
-                "_sm_result", "convergence_detected_val", "wallet_age_impact",
-                "_creator_result", "fee_payer_sybil_val", "_jito_result",
-                "_metaplex_result", "_vybe_result", "_twitter_result",
-                "_website_result", "_tg_result", "_llm_result",
-            ]
-            _batch2_vals = [
-                _sm_result, convergence_detected_val, wallet_age_impact,
-                _creator_result, fee_payer_sybil_val, _jito_result,
-                _metaplex_result, _vybe_result, _twitter_result,
-                _website_result, _tg_result, _llm_result,
-            ]
-            for _i, _v in enumerate(_batch2_vals):
-                if isinstance(_v, BaseException):
-                    logger.warning(f"[ENRICH] Batch2 {_batch2_names[_i]} exception: {_v}")
-            if isinstance(_sm_result, BaseException):
-                _sm_result = (0, 0, 0.0)
-            if isinstance(convergence_detected_val, BaseException):
-                convergence_detected_val = False
-            if isinstance(wallet_age_impact, BaseException):
-                wallet_age_impact = 0
-            if isinstance(_creator_result, BaseException):
-                _creator_result = (None, 0, 0, False)
-            if isinstance(fee_payer_sybil_val, BaseException):
-                fee_payer_sybil_val = False
-            if isinstance(_jito_result, BaseException):
-                _jito_result = (0, False)
-            if isinstance(_metaplex_result, BaseException):
-                _metaplex_result = (0, False, False)
-            if isinstance(_vybe_result, BaseException):
-                _vybe_result = None
-            if isinstance(_twitter_result, BaseException):
-                _twitter_result = None
-            if isinstance(_website_result, BaseException):
-                _website_result = None
-            if isinstance(_tg_result, BaseException):
-                _tg_result = None
-            if isinstance(_llm_result, BaseException):
-                _llm_result = None
+                # Sanitize Batch 2: replace leaked exceptions with safe defaults
+                _batch2_names = [
+                    "_sm_result", "convergence_detected_val", "wallet_age_impact",
+                    "_creator_result", "fee_payer_sybil_val", "_jito_result",
+                    "_metaplex_result", "_vybe_result", "_twitter_result",
+                    "_website_result", "_tg_result", "_llm_result",
+                ]
+                _batch2_vals = [
+                    _sm_result, convergence_detected_val, wallet_age_impact,
+                    _creator_result, fee_payer_sybil_val, _jito_result,
+                    _metaplex_result, _vybe_result, _twitter_result,
+                    _website_result, _tg_result, _llm_result,
+                ]
+                for _i, _v in enumerate(_batch2_vals):
+                    if isinstance(_v, BaseException):
+                        logger.warning(f"[ENRICH] Batch2 {_batch2_names[_i]} exception: {_v}")
+                if isinstance(_sm_result, BaseException):
+                    _sm_result = (0, 0, 0.0)
+                if isinstance(convergence_detected_val, BaseException):
+                    convergence_detected_val = False
+                if isinstance(wallet_age_impact, BaseException):
+                    wallet_age_impact = 0
+                if isinstance(_creator_result, BaseException):
+                    _creator_result = (None, 0, 0, False)
+                if isinstance(fee_payer_sybil_val, BaseException):
+                    fee_payer_sybil_val = False
+                if isinstance(_jito_result, BaseException):
+                    _jito_result = (0, False)
+                if isinstance(_metaplex_result, BaseException):
+                    _metaplex_result = (0, False, False)
+                if isinstance(_vybe_result, BaseException):
+                    _vybe_result = None
+                if isinstance(_twitter_result, BaseException):
+                    _twitter_result = None
+                if isinstance(_website_result, BaseException):
+                    _website_result = None
+                if isinstance(_tg_result, BaseException):
+                    _tg_result = None
+                if isinstance(_llm_result, BaseException):
+                    _llm_result = None
 
-            # Unpack Batch 2 results
-            smart_count, smart_quality, smart_money_weighted_val = _sm_result
-            creator_prof, funding_chain_risk_val, pumpfun_dead_tokens_val, bundled_buy_val = _creator_result
-            jito_score_impact, jito_detected = _jito_result
-            metaplex_score_impact, metaplex_mutable_val, metaplex_homoglyphs_val = _metaplex_result
+                # Unpack Batch 2 results
+                smart_count, smart_quality, smart_money_weighted_val = _sm_result
+                creator_prof, funding_chain_risk_val, pumpfun_dead_tokens_val, bundled_buy_val = _creator_result
+                jito_score_impact, jito_detected = _jito_result
+                metaplex_score_impact, metaplex_mutable_val, metaplex_homoglyphs_val = _metaplex_result
 
-            # Phase 15 results
-            holders_in_profit_pct_val: float | None = None
-            vybe_top_holder_pct_val: float | None = None
-            if _vybe_result:
-                holders_in_profit_pct_val = _vybe_result.holders_in_profit_pct
-                vybe_top_holder_pct_val = _vybe_result.top_holder_pct
+                # Phase 15 results
+                holders_in_profit_pct_val: float | None = None
+                vybe_top_holder_pct_val: float | None = None
+                if _vybe_result:
+                    holders_in_profit_pct_val = _vybe_result.holders_in_profit_pct
+                    vybe_top_holder_pct_val = _vybe_result.top_holder_pct
 
-            twitter_mentions_val: int | None = None
-            twitter_kol_mentions_val: int | None = None
-            twitter_max_likes_val: int | None = None
-            twitter_viral_val = False
-            if _twitter_result:
-                twitter_mentions_val = _twitter_result.total_tweets
-                twitter_kol_mentions_val = _twitter_result.kol_mentions
-                twitter_max_likes_val = _twitter_result.max_likes
-                twitter_viral_val = _twitter_result.max_likes >= 1000
+                twitter_mentions_val: int | None = None
+                twitter_kol_mentions_val: int | None = None
+                twitter_max_likes_val: int | None = None
+                twitter_viral_val = False
+                if _twitter_result:
+                    twitter_mentions_val = _twitter_result.total_tweets
+                    twitter_kol_mentions_val = _twitter_result.kol_mentions
+                    twitter_max_likes_val = _twitter_result.max_likes
+                    twitter_viral_val = _twitter_result.max_likes >= 1000
 
-            # Phase 16 results
-            if _website_result:
-                has_website_val = _website_result.is_reachable
-                domain_age_days_val = _website_result.domain_age_days
+                # Phase 16 results
+                if _website_result:
+                    has_website_val = _website_result.is_reachable
+                    domain_age_days_val = _website_result.domain_age_days
 
-            if _tg_result and _tg_result.exists:
-                tg_member_count_val = _tg_result.member_count
+                if _tg_result and _tg_result.exists:
+                    tg_member_count_val = _tg_result.member_count
 
-            if _llm_result:
-                llm_risk_score_val = _llm_result.risk_score
+                if _llm_result:
+                    llm_risk_score_val = _llm_result.risk_score
+
+            else:
+                # Phase 29: safe defaults when deep detection is skipped
+                smart_count: int | None = None
+                smart_quality: float = 0.5
+                smart_money_weighted_val: float | None = None
+                convergence_detected_val: bool = False
+                wallet_age_impact: int = 0
+                creator_prof = None
+                funding_chain_risk_val: int | None = None
+                pumpfun_dead_tokens_val: int | None = None
+                bundled_buy_val: bool = False
+                fee_payer_sybil_val: bool = False
+                jito_score_impact: int = 0
+                jito_detected: bool = False
+                metaplex_score_impact: int = 0
+                metaplex_mutable_val: bool = False
+                metaplex_homoglyphs_val: bool = False
+                holders_in_profit_pct_val: float | None = None
+                vybe_top_holder_pct_val: float | None = None
+                twitter_mentions_val: int | None = None
+                twitter_kol_mentions_val: int | None = None
+                twitter_max_likes_val: int | None = None
+                twitter_viral_val: bool = False
 
             # PRE_SCAN risk boost + sell sim result
             mint_risk_boost_val = task.prescan_risk_boost or 0

@@ -84,6 +84,13 @@ class Settings(BaseSettings):
     # Creator trace
     default_creator_risk: int = 25
 
+    # Phase 29: API credit optimization — tunable Helius/Vybe parameters
+    convergence_max_buyers: int = 10  # was 15 — each buyer = 2 Helius RPC calls
+    funding_trace_max_hops: int = 2   # was 3 — each hop = 6 Helius RPC calls
+    wallet_age_max_wallets: int = 7   # was 10 — each wallet = 1 Helius RPC call
+    vybe_max_holders_pnl: int = 3     # was 5 — each holder = 1 Vybe API call
+    vybe_prescan_risk_gate: int = 5   # was 10 — skip Vybe if prescan_risk_boost >= this
+
     # Signal decay
     signal_decay_enabled: bool = True
     signal_decay_interval_sec: int = 300

@@ -28,6 +28,7 @@ Integrates 20+ data sources, runs an 11-stage enrichment pipeline, generates tra
 - [Phase 25 Production Fixes](docs/analysis/phase25-production-fixes.md) — Stage starvation fix, MintInfo deserialization, signal calibration (first buy signals + paper trades), portfolio is_paper type fix, dashboard API
 - Phase 27: Real trading engine (Jupiter swaps, wallet, risk manager, circuit breaker, 108 tests)
 - Phase 28: Dashboard real trading UI (Paper/Real/All tabs, wallet balance, tx links), documentation updates
+- [Phase 29 API Credit Optimization](docs/analysis/phase29-api-optimization.md) — GoPlus prescan, two-phase INITIAL gate, Helius param reduction (convergence 15→10, funding 3→2 hops, wallet_age 10→7), Vybe stricter gate (risk≥5, max_holders 3)
 
 ## Key Paths
 - `src/parsers/worker.py` — main event loop (WS clients + enrichment pipeline, ~3000 lines)

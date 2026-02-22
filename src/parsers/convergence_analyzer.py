@@ -38,6 +38,7 @@ async def analyze_convergence(
     token_mint: str,
     buyers: list[str],
     creator_address: str = "",
+    max_buyers: int = 10,
 ) -> ConvergenceResult:
     """Check if first-block buyers send tokens to a common destination.
 
@@ -52,7 +53,7 @@ async def analyze_convergence(
         tracked = 0
 
         # Check each buyer's outgoing token transfers
-        for buyer in buyers[:15]:  # Cap at 15 to limit RPC calls
+        for buyer in buyers[:max_buyers]:  # Phase 29: configurable cap (was 15)
             sigs = await helius.get_signatures_for_address(buyer, limit=10)
             if not sigs:
                 continue

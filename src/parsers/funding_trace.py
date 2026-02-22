@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.models.token import CreatorProfile
 from src.parsers.helius.client import HeliusClient
 
-MAX_HOPS = 3
+MAX_HOPS = 2  # Phase 29: reduced from 3 (configurable via settings.funding_trace_max_hops)
 MIN_SOL_AMOUNT = 10_000_000  # 0.01 SOL in lamports
 
 
