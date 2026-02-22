@@ -824,8 +824,8 @@ async def _polling_loop(
                         )
                         now = asyncio.get_event_loop().time()
                         task = EnrichmentTask(
-                            priority=EnrichmentPriority.NORMAL,
-                            scheduled_at=now + 30,
+                            priority=EnrichmentPriority.MIGRATION,
+                            scheduled_at=now + 5,
                             address=token_addr,
                             stage=EnrichmentStage.PRE_SCAN,
                             fetch_security=True,
@@ -857,8 +857,8 @@ async def _polling_loop(
                         )
                         now = asyncio.get_event_loop().time()
                         task = EnrichmentTask(
-                            priority=EnrichmentPriority.NORMAL,
-                            scheduled_at=now + 30,
+                            priority=EnrichmentPriority.MIGRATION,
+                            scheduled_at=now + 5,
                             address=token.address,
                             stage=EnrichmentStage.PRE_SCAN,
                             fetch_security=True,
