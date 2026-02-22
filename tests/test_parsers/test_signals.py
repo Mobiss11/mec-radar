@@ -83,21 +83,30 @@ def test_bearish_high_concentration():
 
 
 def test_bearish_tiny_liquidity():
-    """Very low liquidity is bearish."""
+    """Very low liquidity is bearish — hard gate fires before tiny_liquidity rule.
+
+    Since Phase 30 added LIQ < $30K hard gate, tokens with $3K liq are now
+    blocked by the gate (action=avoid, low_liquidity_gate) instead of the
+    softer tiny_liquidity rule.
+    """
     snapshot = _make_snapshot(
         score=30,
         liquidity_usd=Decimal("3000"),
         volume_1h=Decimal("1000"),
     )
     result = evaluate_signals(snapshot, None)
-    assert "tiny_liquidity" in result.reasons
+    assert result.action == "avoid"
+    assert "low_liquidity_gate" in result.reasons
 
 
 def test_volume_spike_bullish():
-    """Vol/liq ratio >= 2 fires volume_spike rule."""
+    """Vol/liq ratio >= 2 fires volume_spike rule.
+
+    Liquidity raised to $40K to pass the LIQ < $30K hard gate (Phase 30).
+    """
     snapshot = _make_snapshot(
-        liquidity_usd=Decimal("20000"),
-        volume_1h=Decimal("60000"),
+        liquidity_usd=Decimal("40000"),
+        volume_1h=Decimal("100000"),
         score=45,
     )
     result = evaluate_signals(snapshot, None)

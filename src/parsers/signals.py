@@ -95,6 +95,44 @@ def evaluate_signals(
     mcap = float(snapshot.market_cap or 0)
     score = snapshot.score or 0
 
+    # --- HARD GATES (early reject — skip all other rules) ---
+    # Backtest precision: LIQ<30K = 80%, MCap/Liq>10x = 100%.
+    # All 3 real rugs (Mr., HAPEPE, Conor) + YABOOZARU dump caught.
+    # Zero false positives on successful trades > $30K liq.
+
+    # HG1: Minimum liquidity — tokens with < $30K liq have 80% rug rate
+    # in our data. ALL 3 real rugs had liq $19-23K. All winners had > $43K.
+    if 0 < liq < 30_000:
+        gate_rule = SignalRule(
+            "low_liquidity_gate", -10,
+            f"Hard gate: liquidity ${liq:,.0f} < $30K (high rug risk)",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
+
+    # HG2: Extreme MCap/Liq ratio — empty order book, no exit liquidity.
+    # Conor: MCap $889K on $20K liq (44.7x) = classic pump & dump.
+    # 100% precision in backtest (only caught losers, zero false positives).
+    if liq > 0 and mcap > 0 and mcap / liq > 10:
+        gate_rule = SignalRule(
+            "extreme_mcap_liq_gate", -10,
+            f"Hard gate: MCap/Liq ratio {mcap/liq:.1f}x > 10 (no exit liquidity)",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
+
     # --- BULLISH RULES ---
 
     # R1: High score (scoring model already validated this)
