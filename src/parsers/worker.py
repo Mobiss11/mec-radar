@@ -3485,28 +3485,43 @@ async def _paper_price_loop(
                     logger.warning(f"[PAPER] Jupiter batch fallback failed: {e}")
 
             # Fallback 2: DexScreener for pump.fun tokens still missing
+            # Uses get_token_pairs (per-token) instead of get_tokens_batch because
+            # batch endpoint returns only one pair per token (often the dead bonding
+            # curve pool with near-zero price). Per-token gives all pairs so we can
+            # pick the one with highest liquidity / highest price.
             missing_addrs2 = [p.token_address for p in positions if p.token_id not in token_prices]
             if dexscreener and missing_addrs2:
-                try:
-                    from decimal import Decimal as _Dec
-                    dex_pairs = await dexscreener.get_tokens_batch(missing_addrs2[:30])
-                    # Build address→price map from DexScreener
-                    dex_price_map: dict[str, _Dec] = {}
-                    for pair in dex_pairs:
-                        if pair.priceUsd and pair.baseToken and pair.baseToken.address:
+                from decimal import Decimal as _Dec
+                dex_price_map: dict[str, _Dec] = {}
+                for addr in missing_addrs2[:10]:  # Limit to 10 to respect rate limits
+                    try:
+                        pairs = await dexscreener.get_token_pairs(addr)
+                        if not pairs:
+                            continue
+                        # Pick the pair with highest liquidity (or highest price as tiebreaker)
+                        best_price = _Dec(0)
+                        for pair in pairs:
+                            if not pair.priceUsd or not pair.baseToken:
+                                continue
                             try:
-                                dex_price_map[pair.baseToken.address] = _Dec(pair.priceUsd)
+                                p_usd = _Dec(pair.priceUsd)
                             except Exception:
-                                pass
-                    for pos in positions:
-                        if pos.token_id not in token_prices:
-                            dp = dex_price_map.get(pos.token_address)
-                            if dp and dp > 0:
-                                token_prices[pos.token_id] = dp
-                    if dex_price_map:
-                        logger.info(f"[PAPER] DexScreener fallback got {len(dex_price_map)} prices for {len(missing_addrs2)} missing tokens")
-                except Exception as e:
-                    logger.warning(f"[PAPER] DexScreener fallback failed: {e}")
+                                continue
+                            # Prefer pair with real liquidity; among those, take highest price
+                            pair_liq = float(pair.liquidity.usd) if pair.liquidity and pair.liquidity.usd else 0
+                            if p_usd > best_price or pair_liq > 100:
+                                best_price = max(best_price, p_usd)
+                        if best_price > 0:
+                            dex_price_map[addr] = best_price
+                    except Exception as e:
+                        logger.warning(f"[PAPER] DexScreener pairs failed for {addr[:12]}: {e}")
+                for pos in positions:
+                    if pos.token_id not in token_prices:
+                        dp = dex_price_map.get(pos.token_address)
+                        if dp and dp > 0:
+                            token_prices[pos.token_id] = dp
+                if dex_price_map:
+                    logger.info(f"[PAPER] DexScreener fallback got {len(dex_price_map)} prices for {len(missing_addrs2)} missing tokens")
 
             if not token_prices:
                 await asyncio.sleep(15)
