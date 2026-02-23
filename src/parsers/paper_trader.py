@@ -250,11 +250,14 @@ class PaperTrader:
         pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
         pos.current_price = price
 
-        # Liquidity removed = total loss (can't sell, pool is dead)
+        # Liquidity removed / critically low — can't sell without massive slippage
         if reason == "liquidity_removed":
             _sol_usd = Decimal(str(sol_price_usd))
-            pos.pnl_pct = Decimal("-100")
-            pos.pnl_usd = -(pos.amount_sol_invested or Decimal("0")) * _sol_usd
+            _liq = liquidity_usd or 0
+            # liq=0 → total loss; liq < 5K → ~95% loss (massive slippage)
+            loss_pct = Decimal("-100") if _liq < 100 else Decimal("-95")
+            pos.pnl_pct = loss_pct
+            pos.pnl_usd = (pos.amount_sol_invested or Decimal("0")) * loss_pct / 100 * _sol_usd
             trade = Trade(
                 signal_id=pos.signal_id,
                 token_id=pos.token_id,
@@ -269,7 +272,7 @@ class PaperTrader:
             session.add(trade)
             logger.warning(
                 f"[PAPER] Closed {pos.token_address[:12]} reason=liquidity_removed "
-                f"P&L=-100% (pool dead, tokens unsellable)"
+                f"P&L={loss_pct}% liq=${_liq:,.0f} (pool drained, unsellable)"
             )
             return
 

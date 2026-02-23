@@ -36,8 +36,8 @@ def check_close_conditions(
     5. Early stop: if < -20% after 30 minutes → close early (not recovering)
     6. Timeout: hours max → close
     """
-    # Liquidity removed — pool is dead, tokens unsellable
-    if liquidity_usd is not None and liquidity_usd < 100:
+    # Liquidity critically low — pool drained, can't sell without massive slippage
+    if liquidity_usd is not None and liquidity_usd < 5_000:
         return "liquidity_removed"
 
     if is_rug:

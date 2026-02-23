@@ -352,9 +352,39 @@ class RealTrader:
                     pass
             return True
 
+        # Liquidity drained — skip swap attempt, force-close as total loss
+        if reason == "liquidity_removed":
+            _liq = liquidity_usd or 0
+            logger.warning(
+                f"[REAL] Force-close {_sym}: liquidity drained (${_liq:,.0f}), "
+                f"skip sell attempt"
+            )
+            pos.status = "closed"
+            pos.close_reason = "liquidity_removed"
+            pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
+            pos.current_price = price
+            loss_pct = Decimal("-100") if _liq < 100 else Decimal("-95")
+            pos.pnl_pct = loss_pct
+            _sol_usd = Decimal(str(sol_price_usd))
+            pos.pnl_usd = (pos.amount_sol_invested or Decimal("0")) * loss_pct / 100 * _sol_usd
+            self._sell_fail_count.pop(pos_id, None)
+            if self._alerts:
+                try:
+                    await self._alerts.send_real_close(
+                        symbol=_sym,
+                        address=pos.token_address,
+                        reason="liquidity_removed",
+                        pnl_pct=float(loss_pct),
+                        pnl_usd=float(pos.pnl_usd),
+                        tx_hash=None,
+                    )
+                except Exception:
+                    pass
+            return True
+
         # Circuit breaker bypass for urgent closes (rug, stop_loss, early_stop)
         # and retries (fail_count > 0)
-        urgent_reasons = {"rug", "stop_loss", "early_stop", "timeout"}
+        urgent_reasons = {"rug", "stop_loss", "early_stop", "timeout", "liquidity_removed"}
         if self._circuit.is_tripped and reason not in urgent_reasons and fail_count == 0:
             logger.warning(
                 f"[REAL] Circuit breaker active, deferring close of {pos.token_address[:12]}"
