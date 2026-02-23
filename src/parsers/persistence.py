@@ -256,6 +256,15 @@ async def save_token_snapshot(
             buys_24h = txns.h24.buys
             sells_24h = txns.h24.sells
 
+    # DexScreener price/mcap/liq fallback — ensures non-NULL snapshot data
+    if dex_data:
+        if price is None and dex_data.priceUsd:
+            price = Decimal(dex_data.priceUsd)
+        if market_cap is None and dex_data.fdv:
+            market_cap = dex_data.fdv
+        if liquidity is None and dex_data.liquidity and dex_data.liquidity.usd:
+            liquidity = dex_data.liquidity.usd
+
     snapshot = TokenSnapshot(
         token_id=token_id,
         stage=stage,

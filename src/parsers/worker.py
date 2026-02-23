@@ -2262,7 +2262,7 @@ async def _enrich_token(
 
             # --- Parallel Batch 1: Independent API calls ---
             async def _ni_birdeye_overview() -> object | None:
-                if not (birdeye and config.fetch_gmgn_info):
+                if not birdeye:
                     return None
                 try:
                     return await birdeye.get_token_overview(task.address)
