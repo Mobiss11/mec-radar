@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     enable_gmgn: bool = True
     enable_pumpportal: bool = True
     enable_dexscreener: bool = True
-    enable_meteora_dbc: bool = True  # Believe/LetsBonk/Boop tokens via Helius WS
+    enable_meteora_dbc: bool = False  # Believe/LetsBonk/Boop tokens via Helius WS (disabled)
     enable_birdeye: bool = True  # PRIMARY data source
 
     # Jupiter (free tier — 1 RPS)
