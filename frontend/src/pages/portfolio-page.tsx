@@ -7,7 +7,7 @@ import { AddressBadge } from "@/components/common/address-badge"
 import { EmptyState } from "@/components/common/empty-state"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
-import { formatCompact, formatPct, formatSol, formatUsd, timeAgo } from "@/lib/format"
+import { formatCompact, formatPct, formatPrice, formatSol, formatUsd, timeAgo } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import type { PortfolioMode } from "@/types/api"
 import {
@@ -410,11 +410,11 @@ export function PortfolioPage() {
                   <div className="mt-0.5 flex flex-wrap gap-3 text-xs text-muted-foreground font-data">
                     <span>{formatSol(p.amount_sol_invested as number)}</span>
                     <span>
-                      Entry: {formatUsd(p.entry_price as number)}
+                      Entry: {formatPrice(p.entry_price as number)}
                     </span>
                     {p.current_price != null && (
                       <span>
-                        Now: {formatUsd(p.current_price as number)}
+                        Now: {formatPrice(p.current_price as number)}
                       </span>
                     )}
                     {(p.entry_mcap != null || p.current_mcap != null) && (

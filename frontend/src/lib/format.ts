@@ -7,6 +7,31 @@ export function formatCompact(value: number | null | undefined): string {
   return value.toFixed(value < 1 ? 4 : 2)
 }
 
+/** Format token price — handles micro-prices like 0.00000002345 */
+export function formatPrice(value: number | null | undefined): string {
+  if (value == null) return "—"
+  if (value === 0) return "$0"
+  const abs = Math.abs(value)
+  if (abs >= 1000) return `$${formatCompact(value)}`
+  if (abs >= 1) return `$${value.toFixed(2)}`
+  if (abs >= 0.01) return `$${value.toFixed(4)}`
+  // Micro-prices: count leading zeros, show 2 significant digits
+  // e.g. 0.00000002345 → $0.0₇23
+  const str = abs.toExponential()
+  const match = str.match(/^(\d+\.\d+)e([+-]\d+)$/)
+  if (match) {
+    const exp = parseInt(match[2], 10)
+    if (exp < -2) {
+      const zeros = Math.abs(exp) - 1
+      const sigFigs = abs * Math.pow(10, Math.abs(exp))
+      const digits = sigFigs.toFixed(0).padStart(2, "0").slice(0, 2)
+      const sub = String(zeros).split("").map(d => "₀₁₂₃₄₅₆₇₈₉"[parseInt(d)]).join("")
+      return `$0.0${sub}${digits}`
+    }
+  }
+  return `$${value.toFixed(4)}`
+}
+
 /** Format USD */
 export function formatUsd(value: number | null | undefined): string {
   if (value == null) return "—"
