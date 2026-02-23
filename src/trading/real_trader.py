@@ -352,38 +352,8 @@ class RealTrader:
                     pass
             return True
 
-        # Liquidity drained — skip swap attempt, force-close as total loss
-        if reason == "liquidity_removed":
-            _liq = liquidity_usd or 0
-            logger.warning(
-                f"[REAL] Force-close {_sym}: liquidity drained (${_liq:,.0f}), "
-                f"skip sell attempt"
-            )
-            pos.status = "closed"
-            pos.close_reason = "liquidity_removed"
-            pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
-            pos.current_price = price
-            loss_pct = Decimal("-100") if _liq < 100 else Decimal("-95")
-            pos.pnl_pct = loss_pct
-            _sol_usd = Decimal(str(sol_price_usd))
-            pos.pnl_usd = (pos.amount_sol_invested or Decimal("0")) * loss_pct / 100 * _sol_usd
-            self._sell_fail_count.pop(pos_id, None)
-            if self._alerts:
-                try:
-                    await self._alerts.send_real_close(
-                        symbol=_sym,
-                        address=pos.token_address,
-                        reason="liquidity_removed",
-                        pnl_pct=float(loss_pct),
-                        pnl_usd=float(pos.pnl_usd),
-                        tx_hash=None,
-                    )
-                except Exception:
-                    pass
-            return True
-
-        # Circuit breaker bypass for urgent closes (rug, stop_loss, early_stop)
-        # and retries (fail_count > 0)
+        # Circuit breaker bypass for urgent closes (rug, stop_loss, early_stop,
+        # liquidity_removed) and retries (fail_count > 0)
         urgent_reasons = {"rug", "stop_loss", "early_stop", "timeout", "liquidity_removed"}
         if self._circuit.is_tripped and reason not in urgent_reasons and fail_count == 0:
             logger.warning(
@@ -411,9 +381,17 @@ class RealTrader:
             return True
 
         # Escalating slippage: more attempts = higher slippage tolerance
-        slippage_idx = min(fail_count, len(self._slippage_escalation) - 1)
-        slippage_bps = self._slippage_escalation[slippage_idx]
-        if fail_count > 0:
+        # For liquidity_removed: start with max slippage to salvage whatever possible
+        if reason == "liquidity_removed":
+            slippage_bps = self._slippage_escalation[-1]  # Max slippage (25%)
+            logger.warning(
+                f"[REAL] Attempting sell for {_sym} with max slippage "
+                f"{slippage_bps}bps (liquidity drained, salvage attempt)"
+            )
+        else:
+            slippage_idx = min(fail_count, len(self._slippage_escalation) - 1)
+            slippage_bps = self._slippage_escalation[slippage_idx]
+        if fail_count > 0 and reason != "liquidity_removed":
             logger.info(
                 f"[REAL] Sell retry #{fail_count + 1} for {_sym} "
                 f"with escalated slippage: {slippage_bps}bps"
@@ -427,12 +405,42 @@ class RealTrader:
         if not result.success:
             self._sell_fail_count[pos_id] = fail_count + 1
             self._circuit.record_failure(result.error or "Sell failed")
+            # LP drain: force-close immediately after 1 failed attempt (no point retrying)
+            _max_attempts = 1 if reason == "liquidity_removed" else self._max_sell_attempts
             logger.warning(
                 f"[REAL] Sell failed for {_sym}: {result.error} "
-                f"(attempt {fail_count + 1}/{self._max_sell_attempts}). "
-                f"{'Will auto force-close next cycle.' if fail_count + 1 >= self._max_sell_attempts else 'Will retry with higher slippage.'}"
+                f"(attempt {fail_count + 1}/{_max_attempts}). "
+                f"{'Will auto force-close next cycle.' if fail_count + 1 >= _max_attempts else 'Will retry with higher slippage.'}"
             )
-            # Alert on escalating failures
+            # Force-close LP drain immediately — pool is dead, no point retrying
+            if reason == "liquidity_removed":
+                _liq = liquidity_usd or 0
+                pos.status = "closed"
+                pos.close_reason = "liquidity_removed+sell_failed"
+                pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
+                pos.current_price = price
+                pos.pnl_pct = Decimal("-100")
+                _sol_usd2 = Decimal(str(sol_price_usd))
+                pos.pnl_usd = -(pos.amount_sol_invested or Decimal("0")) * _sol_usd2
+                self._sell_fail_count.pop(pos_id, None)
+                logger.warning(
+                    f"[REAL] Force-closed {_sym}: sell failed on drained pool "
+                    f"(liq=${_liq:,.0f}), PnL=-100%"
+                )
+                if self._alerts:
+                    try:
+                        await self._alerts.send_real_close(
+                            symbol=_sym,
+                            address=pos.token_address,
+                            reason="liquidity_removed+sell_failed",
+                            pnl_pct=-100.0,
+                            pnl_usd=float(pos.pnl_usd),
+                            tx_hash=None,
+                        )
+                    except Exception:
+                        pass
+                return True
+            # Alert on escalating failures for non-LP-drain reasons
             if fail_count + 1 >= self._max_sell_attempts and self._alerts:
                 try:
                     await self._alerts.send_real_error(

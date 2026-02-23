@@ -3512,8 +3512,9 @@ async def _paper_price_loop(
             # Collect unique token addresses
             addresses = list({p.token_address for p in positions})
 
-            # Primary: Birdeye multi-price
+            # Primary: Birdeye multi-price (also captures live liquidity)
             token_prices: dict[int, Decimal] = {}
+            live_liq_map: dict[int, float | None] = {}  # Live liquidity from API
             if birdeye:
                 try:
                     import time as _time
@@ -3528,6 +3529,9 @@ async def _paper_price_loop(
                                 logger.warning(f"[PAPER] Birdeye stale price for {pos.token_address[:12]}... (age={_now_unix - bp.updateUnixTime}s, skipping)")
                                 continue
                             token_prices[pos.token_id] = bp.value
+                        # Capture live liquidity from Birdeye regardless of price
+                        if bp and bp.liquidity is not None:
+                            live_liq_map[pos.token_id] = float(bp.liquidity)
                 except Exception as e:
                     logger.warning(f"[PAPER] Birdeye multi-price failed: {e}")
 
@@ -3585,6 +3589,30 @@ async def _paper_price_loop(
                 if dex_price_map:
                     logger.info(f"[PAPER] DexScreener fallback got {len(dex_price_map)} prices for {len(missing_addrs2)} missing tokens")
 
+            # Build address→token_id map for DexScreener liq fallback
+            _addr_to_tid = {p.token_address: p.token_id for p in positions}
+
+            # DexScreener liquidity fallback: for tokens missing live liq from Birdeye
+            if dexscreener:
+                from decimal import Decimal as _Dec2
+                missing_liq_addrs = [
+                    p.token_address for p in positions
+                    if p.token_id not in live_liq_map
+                ]
+                for addr in missing_liq_addrs[:10]:
+                    try:
+                        pairs = await dexscreener.get_token_pairs(addr)
+                        if not pairs:
+                            live_liq_map[_addr_to_tid[addr]] = 0.0
+                            continue
+                        max_liq = 0.0
+                        for pair in pairs:
+                            if pair.liquidity and pair.liquidity.usd:
+                                max_liq = max(max_liq, float(pair.liquidity.usd))
+                        live_liq_map[_addr_to_tid[addr]] = max_liq
+                    except Exception:
+                        pass
+
             if not token_prices:
                 await asyncio.sleep(15)
                 continue
@@ -3593,43 +3621,10 @@ async def _paper_price_loop(
                 from src.parsers.sol_price import get_sol_price
                 _sol_usd = get_sol_price()
                 async with async_session_factory() as session:
-                    # Batch fetch latest liquidity for all tokens (single query, not N+1)
-                    from src.models.token import TokenSnapshot
-                    from sqlalchemy import func as sa_func, and_
-
-                    # Subquery: max snapshot id per token_id
-                    max_snap = (
-                        sa_select(
-                            TokenSnapshot.token_id,
-                            sa_func.max(TokenSnapshot.id).label("max_id"),
-                        )
-                        .where(TokenSnapshot.token_id.in_(list(token_prices.keys())))
-                        .group_by(TokenSnapshot.token_id)
-                        .subquery()
-                    )
-                    # Join to get liquidity from latest snapshot per token
-                    liq_result = await session.execute(
-                        sa_select(
-                            TokenSnapshot.token_id,
-                            TokenSnapshot.liquidity_usd,
-                            TokenSnapshot.dex_liquidity_usd,
-                        ).join(
-                            max_snap,
-                            and_(
-                                TokenSnapshot.token_id == max_snap.c.token_id,
-                                TokenSnapshot.id == max_snap.c.max_id,
-                            ),
-                        )
-                    )
-                    liq_map: dict[int, float | None] = {}
-                    for row in liq_result.all():
-                        liq_val = float(row[1] or row[2] or 0) or None
-                        liq_map[row[0]] = liq_val
-
                     for token_id, price in token_prices.items():
                         await paper_trader.update_positions(
                             session, token_id, price,
-                            liquidity_usd=liq_map.get(token_id),
+                            liquidity_usd=live_liq_map.get(token_id),
                             sol_price_usd=_sol_usd,
                         )
                     await session.commit()
@@ -3716,8 +3711,9 @@ async def _real_price_loop(
 
             addresses = list({p.token_address for p in positions})
 
-            # Primary: Birdeye multi-price
+            # Primary: Birdeye multi-price (also captures live liquidity)
             token_prices: dict[int, Decimal] = {}
+            live_liq_map: dict[int, float | None] = {}
             if birdeye:
                 try:
                     be_prices = await birdeye.get_price_multi(addresses[:100])
@@ -3725,6 +3721,8 @@ async def _real_price_loop(
                         bp = be_prices.get(pos.token_address)
                         if bp and bp.value:
                             token_prices[pos.token_id] = bp.value
+                        if bp and bp.liquidity is not None:
+                            live_liq_map[pos.token_id] = float(bp.liquidity)
                 except Exception as e:
                     logger.debug(f"[REAL] Birdeye multi-price failed: {e}")
 
@@ -3748,40 +3746,10 @@ async def _real_price_loop(
             from src.parsers.sol_price import get_sol_price
             _sol_usd = get_sol_price()
             async with async_session_factory() as session:
-                from src.models.token import TokenSnapshot
-                from sqlalchemy import func as sa_func, and_
-
-                max_snap = (
-                    sa_select(
-                        TokenSnapshot.token_id,
-                        sa_func.max(TokenSnapshot.id).label("max_id"),
-                    )
-                    .where(TokenSnapshot.token_id.in_(list(token_prices.keys())))
-                    .group_by(TokenSnapshot.token_id)
-                    .subquery()
-                )
-                liq_result = await session.execute(
-                    sa_select(
-                        TokenSnapshot.token_id,
-                        TokenSnapshot.liquidity_usd,
-                        TokenSnapshot.dex_liquidity_usd,
-                    ).join(
-                        max_snap,
-                        and_(
-                            TokenSnapshot.token_id == max_snap.c.token_id,
-                            TokenSnapshot.id == max_snap.c.max_id,
-                        ),
-                    )
-                )
-                liq_map: dict[int, float | None] = {}
-                for row in liq_result.all():
-                    liq_val = float(row[1] or row[2] or 0) or None
-                    liq_map[row[0]] = liq_val
-
                 for token_id, price in token_prices.items():
                     await real_trader.update_positions(
                         session, token_id, price,
-                        liquidity_usd=liq_map.get(token_id),
+                        liquidity_usd=live_liq_map.get(token_id),
                         sol_price_usd=_sol_usd,
                     )
                 await session.commit()
