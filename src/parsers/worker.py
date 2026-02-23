@@ -781,7 +781,7 @@ async def run_parser() -> None:
         if birdeye or jupiter:
             tasks.append(
                 asyncio.create_task(
-                    _real_price_loop(real_trader, birdeye=birdeye, jupiter=jupiter),
+                    _real_price_loop(real_trader, birdeye=birdeye, jupiter=jupiter, dexscreener=dexscreener),
                     name="real_price",
                 )
             )
@@ -3721,13 +3721,10 @@ async def _paper_price_loop(
             # pick the one with highest liquidity / highest price.
             _addr_to_tid = {p.token_address: p.token_id for p in positions}
             missing_addrs2 = [p.token_address for p in positions if p.token_id not in token_prices]
-            # Tokens needing liquidity data (Birdeye multi_price never returns liq)
-            missing_liq_addrs = [
-                p.token_address for p in positions
-                if p.token_id not in live_liq_map
-            ]
-            # Merge: fetch DexScreener for tokens needing price OR liquidity (deduplicated)
-            _dex_fetch_addrs = list(dict.fromkeys(missing_addrs2 + missing_liq_addrs))
+            # Phase 37: Fetch DexScreener for ALL positions (not just missing).
+            # Birdeye multi_price returns bonding-curve liq (near-zero) for migrated tokens.
+            # DexScreener gives per-DEX-pair data — much more reliable for liquidity.
+            _dex_fetch_addrs = list(dict.fromkeys(missing_addrs2 + list(addresses)))
             if missing_addrs2:
                 logger.info(f"[PAPER] {len(missing_addrs2)} tokens missing after Birdeye+Jupiter, trying DexScreener")
             if dexscreener and _dex_fetch_addrs:
@@ -3760,8 +3757,8 @@ async def _paper_price_loop(
                                 best_price = max(best_price, p_usd)
                         if best_price > 0:
                             dex_price_map[addr] = best_price
-                        # Store liquidity (0.0 if no pair had liquidity)
-                        if _tid and _tid not in live_liq_map:
+                        # Phase 37: DexScreener liq OVERRIDES Birdeye (more reliable for DEX pools)
+                        if _tid:
                             live_liq_map[_tid] = max_liq
                     except Exception as e:
                         logger.warning(f"[PAPER] DexScreener pairs failed for {addr[:12]}: {e}")
@@ -3817,8 +3814,18 @@ async def _paper_price_loop(
                 for pos in positions:
                     _pos_liq = live_liq_map.get(pos.token_id)
                     if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
+                        # Phase 37: Only track as rug if price also crashed
+                        # (not just bad liq data from Birdeye)
+                        _pos_price = token_prices.get(pos.token_id)
+                        _price_crashed = (
+                            _pos_price is not None
+                            and pos.entry_price
+                            and pos.entry_price > 0
+                            and float(_pos_price / pos.entry_price) < 0.5
+                        )
+                        if not _price_crashed:
+                            continue  # Price healthy, liq data unreliable
                         # Phase 36: Skip false-positive rug tracking for fresh positions
-                        # with zero liq (DexScreener/Birdeye indexing lag)
                         if _pos_liq == 0.0 and pos.opened_at:
                             if (_now_dt - pos.opened_at).total_seconds() < 90:
                                 continue
@@ -3883,6 +3890,7 @@ async def _real_price_loop(
     real_trader: "RealTrader",
     birdeye: "BirdeyeClient | None" = None,
     jupiter: "JupiterClient | None" = None,
+    dexscreener: "DexScreenerClient | None" = None,
 ) -> None:
     """Real-time price updates for open real positions (10s cycle).
 
@@ -3959,7 +3967,35 @@ async def _real_price_loop(
                 except Exception as e:
                     logger.debug(f"[REAL] Jupiter batch fallback failed: {e}")
 
-            # Phase 36: DB snapshot fallback for liquidity (when Birdeye didn't return it)
+            # Phase 37: DexScreener liq for ALL positions (overrides Birdeye bonding-curve liq)
+            if dexscreener and positions:
+                from decimal import Decimal as _Dec_r
+                _addr_to_tid_r = {p.token_address: p.token_id for p in positions}
+                _real_dex_addrs = list({p.token_address for p in positions})[:10]
+                for _r_addr in _real_dex_addrs:
+                    try:
+                        _r_pairs = await dexscreener.get_token_pairs(_r_addr)
+                        _r_tid = _addr_to_tid_r.get(_r_addr)
+                        if not _r_pairs:
+                            continue
+                        _r_max_liq = 0.0
+                        for _r_pair in _r_pairs:
+                            _r_pair_liq = float(_r_pair.liquidity.usd) if _r_pair.liquidity and _r_pair.liquidity.usd else 0
+                            _r_max_liq = max(_r_max_liq, _r_pair_liq)
+                            # Also pick price from highest-liq pair for missing tokens
+                            if _r_tid and _r_tid not in token_prices and _r_pair.priceUsd:
+                                try:
+                                    _r_p = _Dec_r(_r_pair.priceUsd)
+                                    if _r_p > 0:
+                                        token_prices[_r_tid] = _r_p
+                                except Exception:
+                                    pass
+                        if _r_tid:
+                            live_liq_map[_r_tid] = _r_max_liq
+                    except Exception as e:
+                        logger.debug(f"[REAL] DexScreener pairs failed for {_r_addr[:12]}: {e}")
+
+            # DB snapshot fallback for liquidity (when DexScreener + Birdeye didn't return it)
             _real_missing_liq = [
                 p for p in positions
                 if p.token_id not in live_liq_map and p.token_id in token_prices
@@ -3996,6 +4032,16 @@ async def _real_price_loop(
             for pos in positions:
                 _pos_liq = live_liq_map.get(pos.token_id)
                 if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
+                    # Phase 37: Only track as rug if price also crashed
+                    _pos_price = token_prices.get(pos.token_id)
+                    _price_crashed = (
+                        _pos_price is not None
+                        and pos.entry_price
+                        and pos.entry_price > 0
+                        and float(_pos_price / pos.entry_price) < 0.5
+                    )
+                    if not _price_crashed:
+                        continue
                     await _track_rugged_symbol(pos.symbol)
 
             # Phase 35: Adaptive interval for fresh positions

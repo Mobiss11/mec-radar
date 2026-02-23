@@ -39,16 +39,29 @@ def check_close_conditions(
     """
     # Liquidity critically low — pool drained, can't sell without massive slippage
     if liquidity_usd is not None and liquidity_usd < 5_000:
-        # Phase 36: Grace period for zero-liq on fresh positions.
-        # Zero liquidity on fresh tokens is usually DexScreener/Birdeye indexing lag,
-        # not an actual rug. Non-zero low liq (e.g. $2K) is a genuine LP drain.
-        if liquidity_usd == 0.0 and pos.opened_at:
+        # Phase 37: Price-coherence check.
+        # Birdeye multi_price often returns bonding-curve liquidity (near-zero)
+        # instead of real DEX pool liquidity for migrated pump.fun tokens.
+        # A real LP removal crashes price instantly (90%+ drop).
+        # If price is still >= 50% of entry, the token is alive — data is wrong.
+        _price_healthy = (
+            pos.entry_price
+            and pos.entry_price > 0
+            and current_price >= pos.entry_price * Decimal("0.5")
+        )
+
+        if _price_healthy:
+            # Price hasn't crashed 50%+ → token is likely alive, liq data unreliable
+            pass
+        elif liquidity_usd == 0.0 and pos.opened_at:
+            # Exact zero on fresh position → indexing lag grace period
             age_sec = (now - pos.opened_at).total_seconds()
             if age_sec <= liquidity_grace_period_sec:
                 pass  # Skip — data source likely hasn't indexed yet
             else:
                 return "liquidity_removed"
         else:
+            # Price crashed AND low liquidity → genuine LP drain or rug
             return "liquidity_removed"
 
     if is_rug:

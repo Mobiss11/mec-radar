@@ -1,186 +1,161 @@
-# Phase 33: Anti-Scam Filter v2 — усиление фильтрации rug pull токенов
+# Phase 37: Fix False `liquidity_removed` Closes
 
-## Контекст
+## Context
 
-Продакшн-данные за последние 24ч (23 февраля):
-- **356** закрытых paper позиций
-- **176 (49.4%)** закрыты как `liquidity_removed` — скам/rug pull
-- Профитные трейды: **+63.56 SOL**, скамы: **-119.91 SOL**
-- Нетто: **-56.35 SOL**. Убрав скамы → было бы **+63 SOL**
+57% of positions today (387/681) closed as `liquidity_removed` on LIVE tokens. Root cause: **Birdeye `multi_price` with `include_liquidity=true` returns bonding curve liquidity** (near-zero after DEX migration), not the real DEX pool liquidity. Price is correct (from DEX), but liquidity field references the dead bonding curve.
 
-### Паттерны скама (из анализа 176 rug позиций vs 180 нормальных)
+Evidence from SXAL/LOBCHURCH:
+- SXAL: liq=$64K (enrichment snapshot) → $0.02 (Birdeye multi_price) while price ROSE
+- LOBCHURCH: liq=$50K → $0.07 while price stable
+- Grace period doesn't help: $0.02 ≠ 0.0, bypasses exact-zero check
 
-| Паттерн | Скам | Нормальные | Ratio |
-|---------|------|------------|-------|
-| holders ≤ 5 на INITIAL | **21.8%** | 3.7% | **5.9x** |
-| holders ≤ 2 | ~8% | **0%** | ∞ |
-| rugcheck > 25K | **24%** | 7.1% | **3.4x** |
-| Дренаж < 1 мин | **47.7%** | — | — |
-| Дренаж < 5 мин | **62.8%** | — | — |
-| Copycat (CASH×9, ELSTONKS×8) | массовый | единичный | — |
-| "Creator history of rugged" | 14 скамов | 3 нормальных | **4.7x** |
+## Root Cause
 
-**Ключевой инсайт**: bullish-правила (`explosive_holder_growth`, `organic_buy_pattern`) одинаково срабатывают на скамах и профитных — боты имитируют органическую активность. Нужна bearish-сторона.
+In `_paper_price_loop` (worker.py:3698):
+```python
+if bp and bp.liquidity is not None:
+    live_liq_map[pos.token_id] = float(bp.liquidity)  # BAD: bonding curve liq
+```
 
-## Изменения
+Birdeye `multi_price` aggregates ALL pools for a token. If the bonding curve pool still exists (it does for most pump.fun tokens), `liquidity` can reflect only that pool's near-zero value instead of the active Raydium pool's real liquidity.
 
-### Файл 1: `src/parsers/signals.py`
+## Fix Strategy: Two-layer defense
 
-#### 1.1 HG3: Hard gate — минимум холдеров (после HG2, ~line 137)
+### Layer 1: DexScreener liquidity ALWAYS takes priority (worker.py)
+
+Currently DexScreener liquidity is only used when Birdeye doesn't return it (`if _tid not in live_liq_map`). Fix: **always fetch DexScreener liquidity for ALL open positions** (up to 20), and let it OVERRIDE Birdeye's unreliable multi_price liquidity.
+
+DexScreener `get_token_pairs()` returns per-pair data — we already pick `max_liq` across all pairs. This is the most reliable liquidity source because it shows actual DEX pool liquidity, not bonding curve artifacts.
+
+**Change in `_paper_price_loop`** (worker.py ~3722-3765):
+- Fetch DexScreener for ALL positions (not just missing price/liq)
+- DexScreener liq OVERRIDES Birdeye liq (not just fills gaps)
+- Same for `_real_price_loop`
+
+### Layer 2: Price-coherence guard in close_conditions.py
+
+If Birdeye/DexScreener both fail, add a safety net: if price is stable/rising but liquidity suddenly drops to near-zero — it's data noise, not a real rug.
+
+**In `close_conditions.py`**, before returning `liquidity_removed`:
+- If `current_price >= entry_price * 0.7` (price hasn't crashed 30%+), the token is likely alive
+- A real LP removal crashes price to near-zero instantly
+- Skip `liquidity_removed` when price is coherent → let other conditions (stop loss, timeout) handle naturally
+
+## Files
+
+| File | Changes |
+|------|---------|
+| `src/trading/close_conditions.py` | Add price-coherence guard before `liquidity_removed` |
+| `src/parsers/worker.py` | DexScreener liq overrides Birdeye in both price loops |
+
+## Detailed Changes
+
+### 1. `src/trading/close_conditions.py` — Price-coherence guard
+
+Replace the current liquidity block (lines 41-52):
 
 ```python
-# HG3: Minimum holders — tokens with 0-2 real holders are empty shells.
-# Production: 0% good tokens had holders ≤ 2. Hard gate = zero false positives.
-if 0 < holders <= 2:
-    gate_rule = SignalRule(
-        "min_holders_gate", -10,
-        f"Hard gate: {holders} holders (no real market participants)",
+# Liquidity critically low — pool drained, can't sell without massive slippage
+if liquidity_usd is not None and liquidity_usd < 5_000:
+    # Phase 37: Price-coherence check.
+    # Birdeye multi_price often returns bonding-curve liq (near-zero)
+    # instead of real DEX pool liq. A real LP removal crashes price instantly.
+    # If price is still >= 70% of entry, token is alive — data is wrong.
+    price_ok = (
+        pos.entry_price
+        and pos.entry_price > 0
+        and current_price >= pos.entry_price * Decimal("0.5")
     )
-    return SignalResult(...)  # early return, avoid
+    if price_ok and liquidity_usd < 100:
+        # Near-zero liq but price healthy → bad data, skip
+        pass
+    elif liquidity_usd == 0.0 and pos.opened_at:
+        # Exact zero on fresh position → indexing lag grace period
+        age_sec = (now - pos.opened_at).total_seconds()
+        if age_sec <= liquidity_grace_period_sec:
+            pass
+        else:
+            # Exact zero on mature position — still check price coherence
+            if price_ok:
+                pass  # Price alive, liq data stale
+            else:
+                return "liquidity_removed"
+    else:
+        # Non-zero low liq ($100-$5K) with price crash → genuine LP drain
+        if price_ok:
+            pass  # Price still healthy, liq data likely wrong
+        else:
+            return "liquidity_removed"
 ```
 
-#### 1.2 R61: Compound scam fingerprint — hard avoid (после HG3)
+Logic summary:
+- `liq < $100 AND price >= 50% of entry` → skip (bad data)
+- `liq == 0 AND fresh position` → skip (indexing lag)
+- `liq == 0 AND mature AND price >= 50% of entry` → skip (stale data)
+- `liq < $5K AND price < 50% of entry` → `liquidity_removed` (real rug/drain)
 
-Считаем "scam flags":
-1. LP не burned/locked (Raydium + security confirm)
-2. `is_mintable == True`
-3. `bundled_buy_detected`
-4. `rugcheck_danger_count >= 2`
-5. `pumpfun_dead_tokens >= 3`
-6. `fee_payer_sybil_score > 0.3`
+The 50% threshold is conservative: real LP removals crash price 90%+. A 50% drop WITH low liquidity is a genuine emergency.
 
-**Если 3+ флагов → hard avoid (early return)**. Каждый флаг сам по себе слабый, но 3 одновременно = статистически невозможно на хороших токенах.
+### 2. `src/parsers/worker.py` — DexScreener liq priority
 
-#### 1.3 R60: Low holders penalty (bearish, после R14)
+In `_paper_price_loop` (~line 3722): Change DexScreener fetch scope from "missing only" to "all positions", and let DexScreener OVERRIDE Birdeye liq:
 
 ```python
-# holders ≤ 5 → -3 (soft penalty, не hard gate)
-# 21.8% скамов vs 3.7% хороших — strong signal
+# DexScreener: fetch for ALL open positions (not just missing)
+# DexScreener gives per-DEX-pair liquidity — more reliable than Birdeye multi_price
+# which can return bonding curve liq (near-zero) for migrated tokens
+_dex_fetch_addrs = list(dict.fromkeys(
+    [p.token_address for p in positions if p.token_id not in token_prices]
+    + list(addresses)  # ALL addresses for liquidity
+))[:20]
 ```
 
-#### 1.4 R26: serial_deployer — снижаем порог 5 → 3
-
+And change `if _tid and _tid not in live_liq_map:` to unconditionally store:
 ```python
-if pumpfun_dead_tokens >= 3:  # было 5
-    fired.append(SignalRule("serial_deployer", -3, ...))
+# DexScreener liq overrides Birdeye (more reliable for DEX pool data)
+if _tid:
+    live_liq_map[_tid] = max_liq
 ```
 
-#### 1.5 R64: serial_deployer_mild (elif под R26)
+Same changes in `_real_price_loop`.
 
+### 3. Copycat tracking guard (worker.py ~3817)
+
+Update the rugged symbol tracking to also respect price-coherence:
 ```python
-elif pumpfun_dead_tokens >= 2:
-    fired.append(SignalRule("serial_deployer_mild", -2, ...))
+if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
+    # Only track as rug if price also crashed (not just bad liq data)
+    _pos_price = token_prices.get(pos.token_id)
+    _price_crashed = (
+        _pos_price is not None
+        and pos.entry_price
+        and pos.entry_price > 0
+        and float(_pos_price / pos.entry_price) < 0.5
+    )
+    if not _price_crashed:
+        continue  # Price healthy, liq data unreliable — don't mark as rug
+    ...existing logic...
 ```
 
-#### 1.6 R27: lp_not_burned — вес -1 → -2
+## Tests
 
-```python
-SignalRule("lp_not_burned", -2, ...)  # было -1
-```
+Update `tests/test_trading/test_close_conditions.py`:
+- Existing tests: adjust expectations for price-coherent positions
+- New tests:
+  - `test_skip_liq_removed_when_price_healthy` — liq=$0.02, price=entry → None
+  - `test_close_liq_removed_when_price_crashed` — liq=$0.02, price=10% of entry → "liquidity_removed"
+  - `test_skip_near_zero_liq_price_above_50pct` — liq=$50, price=60% of entry → None
+  - `test_close_low_liq_price_below_50pct` — liq=$2K, price=30% of entry → "liquidity_removed"
 
-#### 1.7 R62: Unsecured LP + fresh token (после R27)
-
-```python
-# LP not burned AND age < 10min AND holders < 30 → -3
-# Стакается с R27 (-2): суммарно -5 для свежего токена без LP lock
-```
-
-#### 1.8 R63: Copycat rugged symbol (новый param `copycat_rugged: bool`)
-
-```python
-# Символ совпадает с недавно заруженным → -6
-# CASH×9, ELSTONKS×8 — повторные деплои одного символа
-```
-
-Новый параметр: `copycat_rugged: bool = False` добавляется в `evaluate_signals()`.
-
-### Файл 2: `src/parsers/worker.py`
-
-#### 2.1 Module-level dict для copycat tracking
-
-```python
-_RUGGED_SYMBOLS: dict[str, float] = {}  # symbol.upper() -> monotonic timestamp
-_RUGGED_SYMBOLS_TTL = 7200  # 2 hours
-```
-
-#### 2.2 В `_paper_price_loop`: записываем rugged символы
-
-После закрытия позиции с `close_reason == "liquidity_removed"`:
-```python
-_RUGGED_SYMBOLS[pos.symbol.upper()] = time.monotonic()
-```
-
-Аналогично для `_real_price_loop`.
-
-#### 2.3 В `_enrich_token`: проверяем copycat перед `evaluate_signals()`
-
-```python
-_copycat = False
-if token.symbol:
-    _ts = _RUGGED_SYMBOLS.get(token.symbol.upper())
-    if _ts and (time.monotonic() - _ts) < _RUGGED_SYMBOLS_TTL:
-        _copycat = True
-
-# Pass to evaluate_signals:
-result = evaluate_signals(..., copycat_rugged=_copycat)
-```
-
-### Файл 3: `tests/test_parsers/test_signals_antiscam.py` (новый)
-
-| Группа | Тестов | Проверка |
-|--------|--------|----------|
-| HG3 | 5 | holders 0,1,2 → blocked; 3 → passes; None → passes |
-| R60 | 4 | holders 3-5 → -3; 6+ → нет; strong bullish → can override |
-| R61 | 5 | 3+ flags → avoid; 2 flags → passes; profitable tokens safe |
-| R62 | 4 | fresh+unsecured → -3; old/many holders/burned → нет |
-| R63 | 2 | copycat=True → -6; False → нет |
-| R64 | 3 | dead=2 → -2; dead=1 → нет; dead=3 → R26 fires |
-| R27 weight | 1 | weight=-2 |
-| R26 threshold | 1 | dead=3 → fires; dead=4 → fires |
-| Backtest profitable | 5 | Hua Hua, CASH, Pan-kun, nanoclaw, BabyAliens → NOT blocked |
-| Backtest scam | 3 | copycat CASH, low holders, compound flags → blocked |
-| **Итого** | **~33** | |
-
-## Ожидаемый эффект
-
-| Правило | Скамов блокирует | False positives |
-|---------|-----------------|-----------------|
-| HG3 (holders≤2) | ~5-10% | **0%** |
-| R61 (compound 3+) | ~15-20% | **~0%** |
-| R60 (holders≤5, -3) | ослабляет ~22% | 3.7% получают -3 (преодолимо) |
-| R62 (LP+fresh, -3) | ~30% | минимум (age+holder guard) |
-| R63 (copycat, -6) | повторные атаки | редко |
-| R64 (2 dead, -2) | ~10-15% | низко |
-| R27 (-1→-2) | усиление | минимально |
-| R26 (5→3) | больше serial | низко |
-
-**Консервативная оценка**: блокировка 40-60% из 176 rug позиций → экономия **48-72 SOL** из -119.91. Нетто с -56 SOL → **+0 до +16 SOL** (breakeven → profit).
-
-## Порядок имплементации
-
-1. `signals.py`: R27 weight -1→-2 (1 строка)
-2. `signals.py`: R26 threshold 5→3 (1 строка)
-3. `signals.py`: HG3 holders≤2 gate (10 строк)
-4. `signals.py`: R60 holders≤5 penalty (8 строк)
-5. `signals.py`: R64 elif serial_deployer_mild (8 строк)
-6. `signals.py`: R62 unsecured LP fresh (12 строк)
-7. `signals.py`: R61 compound scam fingerprint (30 строк)
-8. `signals.py` + `worker.py`: R63 copycat name (new param + dict + tracking)
-9. `test_signals_antiscam.py`: ~33 теста
-
-## Верификация
+## Verification
 
 ```bash
-# 1. Тесты
-.venv/bin/python -m pytest tests/test_parsers/test_signals_antiscam.py -v
-.venv/bin/python -m pytest tests/test_parsers/test_signals_rug_gates.py -v
-.venv/bin/python -m pytest tests/ -v
+# Tests
+.venv/bin/python -m pytest tests/test_trading/test_close_conditions.py -v
 
-# 2. Деплой + мониторинг
-pm2 logs mec-radar --lines 200
-# Проверить: новые avoid с причинами min_holders_gate, compound_scam_fingerprint, etc.
-# Проверить: профитные токены (score 60+, holders 30+) по-прежнему проходят
-
-# 3. Через 1-2 часа: сравнить % liquidity_removed в закрытых позициях
-# Цель: < 30% (сейчас 49.4%)
+# Deploy and monitor
+# After deploy: check PM2 logs for liquidity_removed rate
+# Before: 57% of closes are liquidity_removed
+# After: should drop to <10% (only genuine rugs where price also crashed)
+ssh root@178.156.247.90 "pm2 logs mec-radar --lines 100 --nostream | grep liquidity_removed | wc -l"
 ```

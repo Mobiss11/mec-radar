@@ -1,7 +1,7 @@
 """Tests for close_conditions.check_close_conditions() pure function.
 
 Covers: rug detection, take profit, trailing stop, stop loss, early stop,
-timeout, and no-close scenarios.
+timeout, liquidity removal with Phase 37 price-coherence guard, and no-close scenarios.
 """
 
 from datetime import datetime, timedelta, UTC
@@ -417,35 +417,119 @@ def test_close_take_profit_before_trailing_stop():
     assert result == "take_profit"
 
 
-# ── Liquidity removed ─────────────────────────────────────────────────
+# ── Liquidity removed (with Phase 37 price-coherence guard) ───────────
 
 
-def test_close_liquidity_removed_zero():
-    """Zero liquidity triggers liquidity_removed close."""
+def test_close_liq_removed_price_crashed():
+    """Zero liq + price crashed below 50% → liquidity_removed."""
+    now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),
-        opened_at=datetime.now(UTC) - timedelta(hours=1),
+        opened_at=now - timedelta(hours=1),
     )
     result = check_close_conditions(
-        pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
+        pos, Decimal("0.10"), is_rug=False, now=now,
         liquidity_usd=0.0,
     )
     assert result == "liquidity_removed"
 
 
-def test_close_liquidity_removed_below_threshold():
-    """Liquidity below $5000 triggers liquidity_removed."""
+def test_close_liq_low_price_crashed():
+    """Low liq ($2K) + price crashed below 50% → liquidity_removed."""
+    now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),
-        opened_at=datetime.now(UTC) - timedelta(hours=1),
+        opened_at=now - timedelta(hours=1),
     )
     result = check_close_conditions(
-        pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
-        liquidity_usd=4999.0,
+        pos, Decimal("0.30"), is_rug=False, now=now,
+        liquidity_usd=2000.0,
     )
     assert result == "liquidity_removed"
+
+
+def test_skip_liq_removed_when_price_healthy():
+    """Phase 37: Zero liq but price at entry → skip (bad data, not rug)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    # Price healthy (100% of entry >= 50%), liq data unreliable → skip
+    assert result is None
+
+
+def test_skip_liq_removed_when_price_above_50pct():
+    """Phase 37: Near-zero liq but price at 60% of entry → skip liq_removed.
+    Note: Other conditions may still fire (early_stop, etc.)
+    so we use max_price=entry to avoid trailing_stop."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),  # no trailing stop
+        opened_at=now - timedelta(hours=1),  # past early-stop
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.60"), is_rug=False, now=now,
+        liquidity_usd=50.0,
+    )
+    # Price healthy (60% >= 50%) → skip liq_removed
+    # -40% loss doesn't hit stop_loss (-50%) or early_stop (>30min)
+    assert result is None
+
+
+def test_close_liq_removed_price_at_49pct():
+    """Price at 49% of entry + low liq → liquidity_removed (below 50% threshold)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.49"), is_rug=False, now=now,
+        liquidity_usd=100.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_skip_liq_removed_profitable_position():
+    """Phase 37: Low liq but profitable position → skip (SXAL/LOBCHURCH case)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("0.00003"),
+        max_price=Decimal("0.00004"),  # max below 1.5x so no trailing_stop
+        opened_at=now - timedelta(minutes=10),
+    )
+    # Price above entry — token is alive, Birdeye liq data is bonding curve
+    result = check_close_conditions(
+        pos, Decimal("0.00004"), is_rug=False, now=now,
+        liquidity_usd=0.02,  # Birdeye bonding curve liq
+    )
+    assert result is None
+
+
+def test_close_liq_removed_with_take_profit_level_price():
+    """At 3x price with zero liq → price is healthy, skip liq_removed, fire take_profit."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("3.00"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("3.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    # Price healthy → skip liq_removed → take_profit fires
+    assert result == "take_profit"
 
 
 def test_close_liquidity_none_does_not_trigger():
@@ -476,26 +560,11 @@ def test_close_liquidity_above_threshold_no_close():
     assert result is None
 
 
-def test_close_liquidity_removed_takes_priority():
-    """Liquidity removal should fire before all other checks."""
-    pos = _make_position(
-        entry_price=Decimal("1.00"),
-        max_price=Decimal("3.00"),
-        opened_at=datetime.now(UTC) - timedelta(hours=1),
-    )
-    # At 3x price (take_profit would fire), but liq=0 should fire first
-    result = check_close_conditions(
-        pos, Decimal("3.00"), is_rug=False, now=datetime.now(UTC),
-        liquidity_usd=0.0,
-    )
-    assert result == "liquidity_removed"
-
-
-# ── Phase 36: Grace period for zero-liq fresh positions ─────────────
+# ── Phase 36: Grace period (still works within Phase 37) ──────────────
 
 
 def test_close_liq_zero_fresh_grace_period():
-    """Fresh position (<90s) with zero liquidity → NOT closed (DexScreener lag)."""
+    """Fresh position (<90s) with zero liquidity → NOT closed (indexing lag)."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -509,38 +578,38 @@ def test_close_liq_zero_fresh_grace_period():
     assert result is None
 
 
-def test_close_liq_zero_after_grace_period():
-    """Position past 90s grace period with zero liq → liquidity_removed."""
+def test_close_liq_zero_after_grace_price_crashed():
+    """Past grace + zero liq + price crashed → liquidity_removed."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),
-        opened_at=now - timedelta(seconds=91),
+        opened_at=now - timedelta(seconds=200),
     )
     result = check_close_conditions(
-        pos, Decimal("1.00"), is_rug=False, now=now,
+        pos, Decimal("0.10"), is_rug=False, now=now,
         liquidity_usd=0.0,
     )
     assert result == "liquidity_removed"
 
 
-def test_close_liq_low_nonzero_ignores_grace():
-    """Non-zero low liq ($3K) → close immediately regardless of position age."""
+def test_close_liq_zero_after_grace_price_healthy():
+    """Past grace + zero liq but price healthy → skip (Phase 37)."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
-        max_price=Decimal("1.50"),
-        opened_at=now - timedelta(seconds=10),  # Very fresh
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(seconds=200),
     )
     result = check_close_conditions(
-        pos, Decimal("1.50"), is_rug=False, now=now,
-        liquidity_usd=3000.0,
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
     )
-    assert result == "liquidity_removed"
+    assert result is None
 
 
 def test_close_liq_zero_at_exactly_90s():
-    """Position exactly at 90s with zero liq → still within grace (< 90, strict)."""
+    """Position exactly at 90s with zero liq → still within grace (<=90)."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -569,8 +638,8 @@ def test_close_liq_none_no_close():
     assert result is None
 
 
-def test_close_custom_grace_period_45s():
-    """Custom grace period 45s: position at 50s → closed (past grace)."""
+def test_close_custom_grace_period_45s_price_crashed():
+    """Custom grace 45s: position at 50s + price crashed → liquidity_removed."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -578,15 +647,30 @@ def test_close_custom_grace_period_45s():
         opened_at=now - timedelta(seconds=50),
     )
     result = check_close_conditions(
-        pos, Decimal("1.00"), is_rug=False, now=now,
+        pos, Decimal("0.10"), is_rug=False, now=now,
         liquidity_usd=0.0,
         liquidity_grace_period_sec=45,
     )
     assert result == "liquidity_removed"
 
 
-def test_close_liq_zero_no_opened_at_still_closes():
-    """Zero liq + no opened_at → falls through to non-zero branch → close."""
+def test_close_liq_zero_no_opened_at_price_crashed():
+    """Zero liq + no opened_at + price crashed → liquidity_removed."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=None,
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.10"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_close_liq_zero_no_opened_at_price_healthy():
+    """Zero liq + no opened_at but price healthy → skip (Phase 37)."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -597,5 +681,92 @@ def test_close_liq_zero_no_opened_at_still_closes():
         pos, Decimal("1.00"), is_rug=False, now=now,
         liquidity_usd=0.0,
     )
-    # liquidity_usd == 0.0 but opened_at is None → falls to else branch
+    assert result is None
+
+
+# ── Phase 37: Edge cases for price-coherence guard ────────────────────
+
+
+def test_phase37_exactly_50pct_price_is_healthy():
+    """Price at exactly 50% of entry is the boundary — considered healthy.
+
+    Price-coherence guard skips liq_removed, but -50% PnL hits stop_loss.
+    Use 0.51 to stay above stop_loss threshold and prove liq check is skipped.
+    """
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.51"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    # 0.51 >= 1.00 * 0.5 → price_healthy → skip liq_removed
+    # pnl=-49% → doesn't hit stop_loss (-50%)
+    assert result is None
+
+
+def test_phase37_just_below_50pct_triggers_close():
+    """Price at 49.9% of entry + zero liq → liquidity_removed."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.499"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_phase37_zero_entry_price_no_coherence_check():
+    """Zero entry_price can't compute coherence → falls through to liq check."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("0"),
+        max_price=Decimal("0"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.50"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    # entry_price=0 → price_healthy=False → zero liq, no opened_at issue → close
+    assert result == "liquidity_removed"
+
+
+def test_phase37_liq_4999_price_healthy_skips():
+    """Liq=$4999 (just below $5K) but price healthy → skip.
+
+    Use max_price=1.40 (below 1.5x trailing threshold) to avoid trailing_stop.
+    """
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.40"),  # below 1.5x → no trailing stop
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.20"), is_rug=False, now=now,
+        liquidity_usd=4999.0,
+    )
+    assert result is None
+
+
+def test_phase37_liq_4999_price_crashed_closes():
+    """Liq=$4999 + price at 30% → liquidity_removed."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.30"), is_rug=False, now=now,
+        liquidity_usd=4999.0,
+    )
     assert result == "liquidity_removed"
