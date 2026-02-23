@@ -3463,10 +3463,17 @@ async def _paper_price_loop(
             token_prices: dict[int, Decimal] = {}
             if birdeye:
                 try:
+                    import time as _time
+                    _now_unix = int(_time.time())
+                    _stale_threshold = 300  # 5 min — pump.fun prices freeze after migration
                     be_prices = await birdeye.get_price_multi(addresses[:100])
                     for pos in positions:
                         bp = be_prices.get(pos.token_address)
                         if bp and bp.value:
+                            # Skip stale prices (pump.fun tokens freeze on Birdeye after migration)
+                            if bp.updateUnixTime and (_now_unix - bp.updateUnixTime) > _stale_threshold:
+                                logger.debug(f"[PAPER] Birdeye stale price for {pos.token_address[:12]}... (age={_now_unix - bp.updateUnixTime}s)")
+                                continue
                             token_prices[pos.token_id] = bp.value
                 except Exception as e:
                     logger.warning(f"[PAPER] Birdeye multi-price failed: {e}")
