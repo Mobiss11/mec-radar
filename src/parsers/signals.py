@@ -82,8 +82,9 @@ def evaluate_signals(
     holder_growth_pct: float | None = None,
     # Cross-validation
     solsniffer_score: int | None = None,
-    # Phase 33 — anti-scam v2
+    # Phase 33/34 — anti-scam v2/v3
     copycat_rugged: bool = False,
+    copycat_rug_count: int = 0,
 ) -> SignalResult:
     """Evaluate all signal rules against enriched data.
 
@@ -721,6 +722,28 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
+    # --- PHASE 34: BOT FARMING DETECTION ---
+
+    # R65: Abnormal buys/holder ratio — bots generate many buys from few holders.
+    # Production: scam avg 2.76 buys/holder vs profit avg 1.87.
+    # Threshold 3.5+ catches extreme bot farming with minimal false positives.
+    # Only on fresh tokens (age <= 5min) where bots haven't dispersed yet.
+    if (
+        holders > 0
+        and buys_5m > 0
+        and token_age_minutes is not None
+        and token_age_minutes <= 5
+    ):
+        _bph = buys_5m / holders
+        if _bph >= 3.5:
+            r = SignalRule(
+                "abnormal_buys_per_holder", -3,
+                f"Bot-like activity: {_bph:.1f} buys/holder "
+                f"({buys_5m} buys, {holders} holders)",
+            )
+            fired.append(r)
+            reasons[r.name] = r.description
+
     # --- PHASE 16 COMMUNITY & LLM RULES ---
 
     # R48: Active Telegram community (bullish)
@@ -829,12 +852,27 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
-    # --- PHASE 33 COPYCAT RULE ---
+    # --- PHASE 33/34 COPYCAT RULE ---
 
     # R63: Copycat rugged symbol — same symbol was already rugged recently.
-    # Production: CASH (9 addrs, all -100%), ELSTONKS (8 addrs, all -100%).
-    # Scammers deploy the same symbol repeatedly, draining LP each time.
-    # -6 is heavy but not a hard gate — allows through if overwhelmingly bullish.
+    # Production: CASH×9, ELSTONKS×8, Tahlequah×9, UUSD1×7 — all -100%.
+    # Phase 34 upgrade: 2+ prior rugs = hard avoid (early return).
+    # Single prior rug keeps -6 penalty (can be overridden by strong bullish).
+    # 45% of profitable tokens share symbols with prior rugs, so single-rug
+    # CANNOT be hard avoid — that would kill half of profits.
+    if copycat_rugged and copycat_rug_count >= 2:
+        gate_rule = SignalRule(
+            "copycat_serial_scam", -10,
+            f"Symbol rugged {copycat_rug_count}x — serial scam deployment",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
     if copycat_rugged:
         r = SignalRule(
             "copycat_rugged_symbol", -6,
@@ -934,6 +972,14 @@ def evaluate_signals(
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))
     net = bullish - bearish
+
+    # Phase 34: Copycat cap — single-rug copycat can NOT get buy/strong_buy.
+    # Production: USD0 had R63 (-6) but bullish +12 → still "buy" → lost -100%.
+    # Bullish rules (holder_acceleration, explosive_buy_velocity, organic_buy_pattern)
+    # are trivially farmed by bots, making -6 insufficient.
+    # Cap at watch (net=4) = still tracked, but no paper/real trade opened.
+    if copycat_rugged and net > 4:
+        net = 4
 
     # Graduation zone hard cap: even if bullish rules stack to net=15,
     # a freshly-graduated token with liq>$100K and mcap/liq≈1.5 can NOT

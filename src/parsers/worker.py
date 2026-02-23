@@ -23,11 +23,14 @@ from decimal import Decimal
 
 from loguru import logger
 
-# Phase 33: Copycat symbol tracking — in-memory dict of recently rugged symbols.
+# Phase 33/34: Copycat symbol tracking — Redis-backed with in-memory cache.
+# Tracks (symbol, rug_count) to detect serial scam deployments.
 # Updated by _paper_price_loop and _real_price_loop when liquidity_removed fires.
 # Read by _enrich_token before evaluate_signals() to penalize repeat scam symbols.
-_RUGGED_SYMBOLS: dict[str, float] = {}  # symbol_upper -> monotonic timestamp
+# Phase 34: Migrated from in-memory dict to Redis hash for persistence across restarts.
+_RUGGED_SYMBOLS: dict[str, tuple[float, int]] = {}  # symbol_upper -> (monotonic_ts, rug_count)
 _RUGGED_SYMBOLS_TTL = 7200  # 2 hours
+_RUGGED_SYMBOLS_REDIS_KEY = "antiscam:rugged_symbols"  # Redis hash: symbol -> "count:ts_unix"
 
 from config.settings import settings
 from src.db.database import async_session_factory
@@ -127,6 +130,80 @@ from src.parsers.twitter.client import TwitterClient
 from src.parsers.website_checker import check_website, WebsiteCheckResult
 from src.parsers.telegram_checker.client import TelegramCheckerClient, TelegramCheckResult
 from src.parsers.llm_analyzer.client import LLMAnalyzerClient, LLMAnalysisResult
+
+
+async def _load_rugged_symbols_from_redis() -> None:
+    """Load rugged symbols from Redis on startup. Survives process restarts."""
+    try:
+        redis = await get_redis()
+        raw = await redis.hgetall(_RUGGED_SYMBOLS_REDIS_KEY)
+        now_mono = _time_mod.monotonic()
+        now_unix = _time_mod.time()
+        loaded = 0
+        for sym, val in raw.items():
+            # Format: "count:unix_timestamp"
+            parts = val.split(":")
+            if len(parts) != 2:
+                continue
+            count = int(parts[0])
+            ts_unix = float(parts[1])
+            age_seconds = now_unix - ts_unix
+            if age_seconds < _RUGGED_SYMBOLS_TTL:
+                # Convert unix time to monotonic-equivalent
+                mono_ts = now_mono - age_seconds
+                _RUGGED_SYMBOLS[sym.upper()] = (mono_ts, count)
+                loaded += 1
+            else:
+                # Expired — clean up from Redis
+                await redis.hdel(_RUGGED_SYMBOLS_REDIS_KEY, sym)
+        if loaded:
+            logger.info(f"[COPYCAT] Loaded {loaded} rugged symbols from Redis")
+    except Exception as e:
+        logger.warning(f"[COPYCAT] Failed to load from Redis: {e}")
+
+
+async def _track_rugged_symbol(symbol: str) -> None:
+    """Record a rugged symbol in both memory and Redis.
+
+    Increments rug_count for repeat scammers (CASH×9, ELSTONKS×8 etc).
+    """
+    sym = symbol.upper()
+    now_mono = _time_mod.monotonic()
+    now_unix = _time_mod.time()
+
+    # Update in-memory cache
+    prev = _RUGGED_SYMBOLS.get(sym)
+    count = (prev[1] + 1) if prev else 1
+    _RUGGED_SYMBOLS[sym] = (now_mono, count)
+
+    if not prev:
+        logger.info(f"[COPYCAT] Tracking rugged symbol: {symbol} (count={count})")
+    else:
+        logger.info(f"[COPYCAT] Repeat rug: {symbol} (count={count})")
+
+    # Persist to Redis
+    try:
+        redis = await get_redis()
+        await redis.hset(_RUGGED_SYMBOLS_REDIS_KEY, sym, f"{count}:{now_unix:.0f}")
+    except Exception as e:
+        logger.warning(f"[COPYCAT] Redis persist failed: {e}")
+
+
+def _check_copycat(symbol: str) -> tuple[bool, int]:
+    """Check if a symbol matches a recently rugged token.
+
+    Returns (is_copycat, rug_count).
+    """
+    if not symbol:
+        return False, 0
+    sym = symbol.upper()
+    entry = _RUGGED_SYMBOLS.get(sym)
+    if entry is None:
+        return False, 0
+    ts, count = entry
+    if (_time_mod.monotonic() - ts) >= _RUGGED_SYMBOLS_TTL:
+        return False, 0
+    return True, count
 
 
 async def run_parser() -> None:
@@ -592,6 +669,9 @@ async def run_parser() -> None:
         tasks.append(
             asyncio.create_task(smart_money.refresh_loop(), name="smart_money_refresh")
         )
+
+    # Phase 34: Load rugged symbols from Redis before enrichment starts
+    await _load_rugged_symbols_from_redis()
 
     # Enrichment workers always run (needs at least one data source)
     if settings.enable_birdeye or settings.enable_gmgn:
@@ -3060,13 +3140,13 @@ async def _enrich_token(
                     _age_delta = datetime.utcnow() - token.first_seen_at  # noqa: DTZ003 — DB uses naive UTC
                     _token_age_min = _age_delta.total_seconds() / 60.0
 
-                # Phase 33: Check copycat symbol in rugged symbols dict
-                _copycat_rugged = False
-                if token.symbol:
-                    _sym_ts = _RUGGED_SYMBOLS.get(token.symbol.upper())
-                    if _sym_ts and (_time_mod.monotonic() - _sym_ts) < _RUGGED_SYMBOLS_TTL:
-                        _copycat_rugged = True
-                        logger.info(f"[COPYCAT] {token.symbol} matches recently rugged symbol")
+                # Phase 33/34: Check copycat symbol in rugged symbols dict
+                _copycat_rugged, _copycat_rug_count = _check_copycat(token.symbol or "")
+                if _copycat_rugged:
+                    logger.info(
+                        f"[COPYCAT] {token.symbol} matches rugged symbol "
+                        f"(count={_copycat_rug_count})"
+                    )
 
                 sig = evaluate_signals(
                     snapshot,
@@ -3114,8 +3194,9 @@ async def _enrich_token(
                     holder_growth_pct=holder_growth_pct_val,
                     # Cross-validation
                     solsniffer_score=solsniffer_score_val,
-                    # Phase 33 — anti-scam v2
+                    # Phase 33/34 — anti-scam v2/v3
                     copycat_rugged=_copycat_rugged,
+                    copycat_rug_count=_copycat_rug_count,
                 )
                 logger.info(
                     f"[SIGNAL] {token.symbol or task.address[:12]} "
@@ -3712,15 +3793,12 @@ async def _paper_price_loop(
                         )
                     await session.commit()
 
-                # Phase 33: Track rugged symbols for copycat detection (R63).
+                # Phase 33/34: Track rugged symbols for copycat detection (R63).
                 # If liquidity < $5K for a position, it was closed as liquidity_removed.
                 for pos in positions:
                     _pos_liq = live_liq_map.get(pos.token_id)
                     if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
-                        _sym_upper = pos.symbol.upper()
-                        if _sym_upper not in _RUGGED_SYMBOLS:
-                            logger.info(f"[COPYCAT] Tracking rugged symbol: {pos.symbol}")
-                        _RUGGED_SYMBOLS[_sym_upper] = _time_mod.monotonic()
+                        await _track_rugged_symbol(pos.symbol)
 
         except Exception as e:
             logger.warning(f"[PAPER] Price loop error: {e}")
@@ -3874,14 +3952,11 @@ async def _real_price_loop(
                     )
                 await session.commit()
 
-            # Phase 33: Track rugged symbols for copycat detection (R63).
+            # Phase 33/34: Track rugged symbols for copycat detection (R63).
             for pos in positions:
                 _pos_liq = live_liq_map.get(pos.token_id)
                 if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
-                    _sym_upper = pos.symbol.upper()
-                    if _sym_upper not in _RUGGED_SYMBOLS:
-                        logger.info(f"[COPYCAT] Tracking rugged symbol (real): {pos.symbol}")
-                    _RUGGED_SYMBOLS[_sym_upper] = _time_mod.monotonic()
+                    await _track_rugged_symbol(pos.symbol)
 
         except Exception as e:
             logger.debug(f"[REAL] Price loop error: {e}")

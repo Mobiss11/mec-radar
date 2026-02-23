@@ -1,16 +1,22 @@
-"""Test Phase 33 anti-scam filter rules.
+"""Test Phase 33/34 anti-scam filter rules.
 
 Production data (24h, 2026-02-23):
 - 356 closed paper positions, 176 (49.4%) closed as liquidity_removed (scam).
 - Profitable trades: +63.56 SOL, scams: -119.91 SOL. Net: -56.35 SOL.
 
-New rules:
+Phase 33 rules:
 - R61: compound scam fingerprint (3+ red flags) → hard avoid
 - R60: holders <= 5 → -3 penalty
 - R62: unsecured LP on fresh token → -3
-- R63: copycat rugged symbol → -6
+- R63: copycat rugged symbol → -6 (single rug)
 - R64: serial deployer mild (2 dead tokens) → -2
 - R26 threshold lowered 5→3, R27 weight -1→-2
+
+Phase 34 rules:
+- R63 upgraded: 2+ prior rugs → hard avoid (copycat_serial_scam)
+- R63 single rug: net capped at watch (net≤4, cannot get buy/strong_buy)
+- R65: abnormal buys_per_holder ratio ≥ 3.5 on fresh tokens → -3
+- Redis-backed copycat dict (persistence across restarts)
 
 Note: HG3 (holders <= 2 hard gate) was REMOVED after backtest showed
 false positives: Golem +145%, PolyClaw +137%, SIXCODES +101.6% all had
@@ -264,22 +270,78 @@ class TestUnsecuredLpFresh:
         assert "unsecured_lp_fresh" not in result.reasons
 
 
-# --- R63: Copycat Rugged Symbol ---
+# --- R63: Copycat Rugged Symbol (Phase 33 + Phase 34 upgrade) ---
 
 
 class TestCopycatRuggedSymbol:
-    """R63: copycat_rugged=True → -6."""
+    """R63: copycat detection — single rug -6 + cap, 2+ rugs hard avoid."""
 
-    def test_copycat_penalty(self):
-        """Copycat symbol → -6."""
+    def test_copycat_single_rug_penalty(self):
+        """Single prior rug → -6 penalty (not hard avoid)."""
         snapshot = _make_snapshot()
         result = evaluate_signals(
             snapshot, _make_security(),
             copycat_rugged=True,
+            copycat_rug_count=1,
         )
         assert "copycat_rugged_symbol" in result.reasons
+        assert "copycat_serial_scam" not in result.reasons
         rule = [r for r in result.rules_fired if r.name == "copycat_rugged_symbol"]
         assert rule[0].weight == -6
+
+    def test_copycat_serial_2_rugs_hard_avoid(self):
+        """2 prior rugs → hard avoid (copycat_serial_scam)."""
+        snapshot = _make_snapshot(
+            score=70,
+            holders_count=200,
+            smart_wallets_count=5,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=2,
+        )
+        assert result.action == "avoid"
+        assert "copycat_serial_scam" in result.reasons
+        assert result.net_score == -10
+        # Hard avoid = early return, only 1 rule
+        assert len(result.rules_fired) == 1
+
+    def test_copycat_serial_9_rugs_hard_avoid(self):
+        """9 prior rugs (CASH×9) → hard avoid."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=9,
+        )
+        assert result.action == "avoid"
+        assert "copycat_serial_scam" in result.reasons
+
+    def test_copycat_single_rug_capped_at_watch(self):
+        """Single rug + very strong bullish → capped at watch (net≤4)."""
+        snapshot = _make_snapshot(
+            score=75,  # +3
+            holders_count=100,
+            smart_wallets_count=5,  # +3
+            buys_5m=80,  # +3 explosive_buy_velocity
+            buys_1h=200,
+            sells_1h=30,  # +2 buy_pressure
+            volume_5m=Decimal("300000"),  # +2 volume_spike_ratio
+        )
+        sec = _make_security()
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=1,
+            token_age_minutes=2.0,
+        )
+        assert "copycat_rugged_symbol" in result.reasons
+        # Net should be capped at 4 (max watch)
+        assert result.net_score <= 4
+        assert result.action in ("watch", "avoid")
+        # Definitely NOT buy or strong_buy
+        assert result.action not in ("buy", "strong_buy")
 
     def test_no_copycat_no_penalty(self):
         """No copycat → no penalty."""
@@ -289,6 +351,18 @@ class TestCopycatRuggedSymbol:
             copycat_rugged=False,
         )
         assert "copycat_rugged_symbol" not in result.reasons
+        assert "copycat_serial_scam" not in result.reasons
+
+    def test_copycat_rug_count_0_no_penalty(self):
+        """copycat_rugged=True but count=0 → treated as single rug."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=0,
+        )
+        # count=0 < 2, so no serial hard avoid, but R63 single fires
+        assert "copycat_rugged_symbol" in result.reasons
 
 
 # --- R64: Serial Deployer Mild ---
@@ -330,6 +404,104 @@ class TestSerialDeployerMild:
         assert "serial_deployer_mild" not in result.reasons
         rule = [r for r in result.rules_fired if r.name == "serial_deployer"]
         assert rule[0].weight == -3
+
+
+# --- R65: Abnormal Buys/Holder Ratio (Phase 34) ---
+
+
+class TestAbnormalBuysPerHolder:
+    """R65: buys_per_holder >= 3.5 on fresh token → -3."""
+
+    def test_high_ratio_penalty(self):
+        """buys=150, holders=30 → ratio 5.0 → -3."""
+        snapshot = _make_snapshot(
+            holders_count=30,
+            buys_5m=150,
+            sells_5m=10,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=2.0,
+        )
+        assert "abnormal_buys_per_holder" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "abnormal_buys_per_holder"]
+        assert rule[0].weight == -3
+
+    def test_normal_ratio_no_penalty(self):
+        """buys=40, holders=30 → ratio 1.33 → no penalty."""
+        snapshot = _make_snapshot(
+            holders_count=30,
+            buys_5m=40,
+            sells_5m=10,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=2.0,
+        )
+        assert "abnormal_buys_per_holder" not in result.reasons
+
+    def test_exact_threshold_fires(self):
+        """buys=35, holders=10 → ratio 3.5 → fires."""
+        snapshot = _make_snapshot(
+            holders_count=10,
+            buys_5m=35,
+            sells_5m=5,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=3.0,
+        )
+        assert "abnormal_buys_per_holder" in result.reasons
+
+    def test_below_threshold_no_penalty(self):
+        """buys=34, holders=10 → ratio 3.4 → no penalty."""
+        snapshot = _make_snapshot(
+            holders_count=10,
+            buys_5m=34,
+            sells_5m=5,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=3.0,
+        )
+        assert "abnormal_buys_per_holder" not in result.reasons
+
+    def test_old_token_no_penalty(self):
+        """buys=150, holders=30 → ratio 5.0 but age=10m → no penalty (age > 5m)."""
+        snapshot = _make_snapshot(
+            holders_count=30,
+            buys_5m=150,
+            sells_5m=10,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=10.0,
+        )
+        assert "abnormal_buys_per_holder" not in result.reasons
+
+    def test_no_age_no_penalty(self):
+        """buys=150, holders=30 → ratio 5.0 but no age info → no penalty."""
+        snapshot = _make_snapshot(
+            holders_count=30,
+            buys_5m=150,
+            sells_5m=10,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+        )
+        assert "abnormal_buys_per_holder" not in result.reasons
+
+    def test_zero_holders_no_penalty(self):
+        """buys=50, holders=0 → skip (division guard)."""
+        snapshot = _make_snapshot(
+            holders_count=0,
+            buys_5m=50,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=2.0,
+        )
+        assert "abnormal_buys_per_holder" not in result.reasons
 
 
 # --- R27 Weight Change ---
@@ -409,6 +581,7 @@ class TestProfitableTokensSurvive:
         )
         assert "compound_scam_fingerprint" not in result.reasons
         assert "low_holders" not in result.reasons
+        assert "abnormal_buys_per_holder" not in result.reasons
         assert result.action in ("buy", "strong_buy", "watch")
 
     def test_profitable_low_liq_token(self):
@@ -462,6 +635,25 @@ class TestProfitableTokensSurvive:
         assert "compound_scam_fingerprint" not in result.reasons
         assert result.action != "avoid"
 
+    def test_profitable_organic_high_buys(self):
+        """Profitable token with high buys/holder but ratio < 3.5 → no R65."""
+        snapshot = _make_snapshot(
+            holders_count=50,
+            score=68,
+            smart_wallets_count=3,
+            buys_5m=150,  # 150/50 = 3.0 < 3.5
+            sells_5m=20,
+            buys_1h=200,
+            sells_1h=30,
+        )
+        sec = _make_security()
+        result = evaluate_signals(
+            snapshot, sec,
+            token_age_minutes=1.5,
+        )
+        assert "abnormal_buys_per_holder" not in result.reasons
+        assert result.action in ("buy", "strong_buy")
+
 
 # --- Backtest: Known Scam Tokens Blocked ---
 
@@ -507,20 +699,56 @@ class TestScamTokensBlocked:
         assert result.action == "avoid"
         assert "compound_scam_fingerprint" in result.reasons
 
-    def test_scam_copycat_heavily_penalized(self):
-        """Copycat CASH (9th deploy) → -6 from R63 + other bearish rules."""
+    def test_scam_copycat_single_rug_capped(self):
+        """Copycat single rug + strong bullish → capped at watch."""
         snapshot = _make_snapshot(
-            holders_count=15,
-            score=45,
+            holders_count=100,
+            score=70,
+            smart_wallets_count=3,
+            buys_5m=60,
+            buys_1h=60,
+            sells_1h=15,
         )
-        sec = _make_security(lp_burned=False, lp_locked=False)
+        sec = _make_security()
         result = evaluate_signals(
             snapshot, sec,
-            raydium_lp_burned=False,
-            token_age_minutes=1.0,
             copycat_rugged=True,
+            copycat_rug_count=1,
+            token_age_minutes=2.0,
         )
         assert "copycat_rugged_symbol" in result.reasons
-        # Combined bearish: copycat(-6) + lp_not_burned(-2) + unsecured_lp_fresh(-3) = -11
-        # Even with some bullish, should be avoid or watch at best
-        assert result.bearish_score >= 6
+        # Even with strong bullish, capped at watch
+        assert result.action not in ("buy", "strong_buy")
+
+    def test_scam_serial_copycat_hard_avoid(self):
+        """Serial copycat (2+ rugs) → hard avoid regardless of bullish."""
+        snapshot = _make_snapshot(
+            holders_count=500,
+            score=80,
+            smart_wallets_count=5,
+            buys_5m=200,
+            buys_1h=500,
+            sells_1h=50,
+        )
+        sec = _make_security()
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=4,
+            token_age_minutes=1.0,
+        )
+        assert result.action == "avoid"
+        assert "copycat_serial_scam" in result.reasons
+
+    def test_scam_bot_farmed_buys(self):
+        """Bot-farmed token: 200 buys from 20 holders (ratio 10.0) → R65 fires."""
+        snapshot = _make_snapshot(
+            holders_count=20,
+            buys_5m=200,
+            sells_5m=5,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=1.0,
+        )
+        assert "abnormal_buys_per_holder" in result.reasons
