@@ -3472,7 +3472,7 @@ async def _paper_price_loop(
                         if bp and bp.value:
                             # Skip stale prices (pump.fun tokens freeze on Birdeye after migration)
                             if bp.updateUnixTime and (_now_unix - bp.updateUnixTime) > _stale_threshold:
-                                logger.debug(f"[PAPER] Birdeye stale price for {pos.token_address[:12]}... (age={_now_unix - bp.updateUnixTime}s)")
+                                logger.warning(f"[PAPER] Birdeye stale price for {pos.token_address[:12]}... (age={_now_unix - bp.updateUnixTime}s, skipping)")
                                 continue
                             token_prices[pos.token_id] = bp.value
                 except Exception as e:
@@ -3497,6 +3497,8 @@ async def _paper_price_loop(
             # curve pool with near-zero price). Per-token gives all pairs so we can
             # pick the one with highest liquidity / highest price.
             missing_addrs2 = [p.token_address for p in positions if p.token_id not in token_prices]
+            if missing_addrs2:
+                logger.info(f"[PAPER] {len(missing_addrs2)} tokens missing after Birdeye+Jupiter, trying DexScreener")
             if dexscreener and missing_addrs2:
                 from decimal import Decimal as _Dec
                 dex_price_map: dict[str, _Dec] = {}
