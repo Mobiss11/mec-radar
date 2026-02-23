@@ -856,24 +856,21 @@ def evaluate_signals(
 
     # R63: Copycat rugged symbol — same symbol was already rugged recently.
     # Production: CASH×9, ELSTONKS×8, Tahlequah×9, UUSD1×7 — all -100%.
-    # Phase 34 upgrade: 2+ prior rugs = hard avoid (early return).
-    # Single prior rug keeps -6 penalty (can be overridden by strong bullish).
-    # 45% of profitable tokens share symbols with prior rugs, so single-rug
-    # CANNOT be hard avoid — that would kill half of profits.
-    if copycat_rugged and copycat_rug_count >= 2:
-        gate_rule = SignalRule(
-            "copycat_serial_scam", -10,
-            f"Symbol rugged {copycat_rug_count}x — serial scam deployment",
+    #
+    # IMPORTANT: Hard avoid for 2+ rugs was REMOVED after backtest showed
+    # 86/153 profitable positions share symbols with 2+ rugs (agent1c, Grok-1,
+    # MOSS, CLAW, Tahlequah etc). Popular meme symbols get deployed by BOTH
+    # scammers AND legit creators — symbol alone cannot distinguish them.
+    #
+    # Tiered penalty: higher rug_count = heavier weight, but NEVER hard avoid.
+    if copycat_rugged and copycat_rug_count >= 3:
+        r = SignalRule(
+            "copycat_serial_scam", -8,
+            f"Symbol rugged {copycat_rug_count}x — high-frequency scam symbol",
         )
-        return SignalResult(
-            rules_fired=[gate_rule],
-            bullish_score=0,
-            bearish_score=10,
-            net_score=-10,
-            action="avoid",
-            reasons={gate_rule.name: gate_rule.description},
-        )
-    if copycat_rugged:
+        fired.append(r)
+        reasons[r.name] = r.description
+    elif copycat_rugged:
         r = SignalRule(
             "copycat_rugged_symbol", -6,
             "Symbol matches a recently rugged token (copycat scam)",
@@ -973,13 +970,11 @@ def evaluate_signals(
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))
     net = bullish - bearish
 
-    # Phase 34: Copycat cap — single-rug copycat can NOT get buy/strong_buy.
-    # Production: USD0 had R63 (-6) but bullish +12 → still "buy" → lost -100%.
-    # Bullish rules (holder_acceleration, explosive_buy_velocity, organic_buy_pattern)
-    # are trivially farmed by bots, making -6 insufficient.
-    # Cap at watch (net=4) = still tracked, but no paper/real trade opened.
-    if copycat_rugged and net > 4:
-        net = 4
+    # Phase 34: Copycat cap REMOVED after backtest.
+    # 86/153 profitable positions share symbols with 2+ rugs. Popular meme
+    # symbols (MOSS, CLAW, agent1c, Grok-1) produce both scams and profits.
+    # CLEUS +140.4% had copycat flag — would have been capped at watch.
+    # R63 -6/-8 penalty is sufficient; bullish override is INTENTIONAL here.
 
     # Graduation zone hard cap: even if bullish rules stack to net=15,
     # a freshly-graduated token with liq>$100K and mcap/liq≈1.5 can NOT

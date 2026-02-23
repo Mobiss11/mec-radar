@@ -13,10 +13,11 @@ Phase 33 rules:
 - R26 threshold lowered 5→3, R27 weight -1→-2
 
 Phase 34 rules:
-- R63 upgraded: 2+ prior rugs → hard avoid (copycat_serial_scam)
-- R63 single rug: net capped at watch (net≤4, cannot get buy/strong_buy)
+- R63 tiered: 1-2 rugs → -6, 3+ rugs → -8 (NEVER hard avoid — backtest
+  showed 86/153 profitable positions share symbols with 2+ rugs)
 - R65: abnormal buys_per_holder ratio ≥ 3.5 on fresh tokens → -3
 - Redis-backed copycat dict (persistence across restarts)
+- Copycat cap/hard-avoid REMOVED: popular memes produce both scams and profits
 
 Note: HG3 (holders <= 2 hard gate) was REMOVED after backtest showed
 false positives: Golem +145%, PolyClaw +137%, SIXCODES +101.6% all had
@@ -274,10 +275,15 @@ class TestUnsecuredLpFresh:
 
 
 class TestCopycatRuggedSymbol:
-    """R63: copycat detection — single rug -6 + cap, 2+ rugs hard avoid."""
+    """R63: copycat detection — tiered penalty, NEVER hard avoid.
+
+    Backtest: 86/153 profitable positions share symbols with 2+ rugs.
+    Popular memes (MOSS, CLAW, agent1c, Grok-1) are both scam and legit.
+    Hard avoid was REMOVED — tiered soft penalty only.
+    """
 
     def test_copycat_single_rug_penalty(self):
-        """Single prior rug → -6 penalty (not hard avoid)."""
+        """Single prior rug → -6 penalty (soft, overridable)."""
         snapshot = _make_snapshot()
         result = evaluate_signals(
             snapshot, _make_security(),
@@ -289,37 +295,51 @@ class TestCopycatRuggedSymbol:
         rule = [r for r in result.rules_fired if r.name == "copycat_rugged_symbol"]
         assert rule[0].weight == -6
 
-    def test_copycat_serial_2_rugs_hard_avoid(self):
-        """2 prior rugs → hard avoid (copycat_serial_scam)."""
-        snapshot = _make_snapshot(
-            score=70,
-            holders_count=200,
-            smart_wallets_count=5,
-        )
+    def test_copycat_serial_3_rugs_heavy_penalty(self):
+        """3+ prior rugs → -8 penalty (heavy but NOT hard avoid)."""
+        snapshot = _make_snapshot()
         result = evaluate_signals(
             snapshot, _make_security(),
             copycat_rugged=True,
-            copycat_rug_count=2,
+            copycat_rug_count=3,
         )
-        assert result.action == "avoid"
         assert "copycat_serial_scam" in result.reasons
-        assert result.net_score == -10
-        # Hard avoid = early return, only 1 rule
-        assert len(result.rules_fired) == 1
+        rule = [r for r in result.rules_fired if r.name == "copycat_serial_scam"]
+        assert rule[0].weight == -8
+        # NOT hard avoid — token continues normal evaluation
+        assert len(result.rules_fired) > 1  # other rules also fire
 
-    def test_copycat_serial_9_rugs_hard_avoid(self):
-        """9 prior rugs (CASH×9) → hard avoid."""
+    def test_copycat_serial_9_rugs_heavy_penalty(self):
+        """9 prior rugs (CASH×9) → -8 penalty, still soft."""
         snapshot = _make_snapshot()
         result = evaluate_signals(
             snapshot, _make_security(),
             copycat_rugged=True,
             copycat_rug_count=9,
         )
-        assert result.action == "avoid"
         assert "copycat_serial_scam" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "copycat_serial_scam"]
+        assert rule[0].weight == -8
 
-    def test_copycat_single_rug_capped_at_watch(self):
-        """Single rug + very strong bullish → capped at watch (net≤4)."""
+    def test_copycat_2_rugs_still_single_tier(self):
+        """2 prior rugs → -6 (single tier, serial starts at 3+)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=2,
+        )
+        assert "copycat_rugged_symbol" in result.reasons
+        assert "copycat_serial_scam" not in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "copycat_rugged_symbol"]
+        assert rule[0].weight == -6
+
+    def test_copycat_strong_bullish_can_still_buy(self):
+        """Copycat -6 + strong bullish → can still be buy/strong_buy.
+
+        Backtest: CLEUS +140.4% had copycat flag, was strong_buy.
+        This is INTENTIONAL — popular meme symbols produce profits too.
+        """
         snapshot = _make_snapshot(
             score=75,  # +3
             holders_count=100,
@@ -337,11 +357,8 @@ class TestCopycatRuggedSymbol:
             token_age_minutes=2.0,
         )
         assert "copycat_rugged_symbol" in result.reasons
-        # Net should be capped at 4 (max watch)
-        assert result.net_score <= 4
-        assert result.action in ("watch", "avoid")
-        # Definitely NOT buy or strong_buy
-        assert result.action not in ("buy", "strong_buy")
+        # Strong bullish CAN override copycat penalty
+        assert result.action in ("buy", "strong_buy")
 
     def test_no_copycat_no_penalty(self):
         """No copycat → no penalty."""
@@ -353,15 +370,14 @@ class TestCopycatRuggedSymbol:
         assert "copycat_rugged_symbol" not in result.reasons
         assert "copycat_serial_scam" not in result.reasons
 
-    def test_copycat_rug_count_0_no_penalty(self):
-        """copycat_rugged=True but count=0 → treated as single rug."""
+    def test_copycat_rug_count_0_fires_single(self):
+        """copycat_rugged=True but count=0 → single tier -6."""
         snapshot = _make_snapshot()
         result = evaluate_signals(
             snapshot, _make_security(),
             copycat_rugged=True,
             copycat_rug_count=0,
         )
-        # count=0 < 2, so no serial hard avoid, but R63 single fires
         assert "copycat_rugged_symbol" in result.reasons
 
 
@@ -699,29 +715,30 @@ class TestScamTokensBlocked:
         assert result.action == "avoid"
         assert "compound_scam_fingerprint" in result.reasons
 
-    def test_scam_copycat_single_rug_capped(self):
-        """Copycat single rug + strong bullish → capped at watch."""
+    def test_scam_copycat_with_weak_bullish_becomes_avoid(self):
+        """Copycat -6 on weak token → bearish wins → avoid."""
         snapshot = _make_snapshot(
-            holders_count=100,
-            score=70,
-            smart_wallets_count=3,
-            buys_5m=60,
-            buys_1h=60,
-            sells_1h=15,
+            holders_count=15,
+            score=45,
         )
-        sec = _make_security()
+        sec = _make_security(lp_burned=False, lp_locked=False)
         result = evaluate_signals(
             snapshot, sec,
             copycat_rugged=True,
             copycat_rug_count=1,
-            token_age_minutes=2.0,
+            raydium_lp_burned=False,
+            token_age_minutes=1.0,
         )
         assert "copycat_rugged_symbol" in result.reasons
-        # Even with strong bullish, capped at watch
-        assert result.action not in ("buy", "strong_buy")
+        # Weak bullish + heavy bearish (copycat -6 + lp_not_burned -2 + unsecured_lp_fresh -3)
+        assert result.bearish_score >= 6
 
-    def test_scam_serial_copycat_hard_avoid(self):
-        """Serial copycat (2+ rugs) → hard avoid regardless of bullish."""
+    def test_scam_serial_copycat_heavy_penalty(self):
+        """Serial copycat (3+ rugs) → -8 penalty (but NOT hard avoid).
+
+        Backtest showed 86/153 profitable positions had 2+ rugs.
+        Popular memes (MOSS, CLAW) produce both scams and profits.
+        """
         snapshot = _make_snapshot(
             holders_count=500,
             score=80,
@@ -737,8 +754,10 @@ class TestScamTokensBlocked:
             copycat_rug_count=4,
             token_age_minutes=1.0,
         )
-        assert result.action == "avoid"
         assert "copycat_serial_scam" in result.reasons
+        # Heavy penalty but bullish can still override
+        rule = [r for r in result.rules_fired if r.name == "copycat_serial_scam"]
+        assert rule[0].weight == -8
 
     def test_scam_bot_farmed_buys(self):
         """Bot-farmed token: 200 buys from 20 holders (ratio 10.0) → R65 fires."""
