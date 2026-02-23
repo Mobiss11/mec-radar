@@ -3091,8 +3091,10 @@ async def _enrich_token(
                 if sig.action in ("strong_buy", "buy", "watch"):
                     # Atomic upsert: INSERT ... ON CONFLICT DO UPDATE
                     # Uses partial unique index uq_signals_token_status_active
+                    # Wrapped in savepoint to prevent failed upsert from killing
+                    # the entire enrichment session (InFailedSQLTransactionError cascade)
                     from sqlalchemy.dialects.postgresql import insert as pg_insert
-                    from sqlalchemy import func as _sig_func
+                    from sqlalchemy import func as _sig_func, text as _text
 
                     _insert_vals = {
                         "token_id": token.id,
@@ -3109,7 +3111,7 @@ async def _enrich_token(
                         .values(**_insert_vals)
                         .on_conflict_do_update(
                             index_elements=["token_id", "status"],
-                            index_where=Signal.status.in_(("strong_buy", "buy", "watch")),
+                            index_where=_text("status IN ('strong_buy', 'buy', 'watch')"),
                             set_={
                                 "score": score,
                                 "reasons": sig.reasons,
@@ -3121,8 +3123,31 @@ async def _enrich_token(
                         )
                         .returning(Signal)
                     )
-                    _result = await session.execute(_upsert_stmt)
-                    signal_record = _result.scalar_one()
+                    # Use savepoint so DB errors don't kill the whole session
+                    signal_record = None
+                    try:
+                        async with session.begin_nested():
+                            _result = await session.execute(_upsert_stmt)
+                            signal_record = _result.scalar_one()
+                    except Exception as _upsert_err:
+                        logger.warning(
+                            f"[SIGNAL] Upsert failed for {token.symbol or task.address[:12]}, "
+                            f"falling back to simple INSERT: {_upsert_err}"
+                        )
+                        # Fallback: simple INSERT (may fail on dupe, that's ok)
+                        try:
+                            async with session.begin_nested():
+                                new_sig = Signal(**_insert_vals)
+                                session.add(new_sig)
+                                await session.flush()
+                                signal_record = new_sig
+                        except Exception:
+                            logger.warning(
+                                f"[SIGNAL] Fallback INSERT also failed for "
+                                f"{token.symbol or task.address[:12]}"
+                            )
+                    if signal_record is None:
+                        raise RuntimeError("Signal upsert failed, skip position opening")
                     if sig.action in ("strong_buy", "buy"):
                         logger.info(
                             f"[SIGNAL] {sig.action.upper()} {token.symbol or task.address[:12]} "
