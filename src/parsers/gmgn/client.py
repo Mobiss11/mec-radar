@@ -38,22 +38,37 @@ SESSION_ROTATE_INTERVAL = 50
 
 
 class GmgnClient:
-    """Async HTTP client for gmgn.ai with TLS fingerprint bypass and proxy support."""
+    """Async HTTP client for gmgn.ai with TLS fingerprint bypass and proxy pool."""
 
     def __init__(
         self,
         rate_limiter: RateLimiter | None = None,
         max_rps: float = 1.5,
         proxy_url: str = "",
+        proxy_pool: list[str] | None = None,
     ) -> None:
         self._rate_limiter = rate_limiter or RateLimiter(max_rps)
         self._ua = UserAgent()
-        self._proxy_url = proxy_url
+        # Support both single proxy and pool
+        self._proxy_pool: list[str] = []
+        if proxy_pool:
+            self._proxy_pool = [p.strip() for p in proxy_pool if p.strip()]
+        if proxy_url and proxy_url not in self._proxy_pool:
+            self._proxy_pool.append(proxy_url)
+        self._proxy_idx = 0
         self._session = self._create_session()
         self._request_count = 0
         self._consecutive_403s = 0
         self._circuit_open_until = 0.0
         self._circuit_trip_count = 0  # Exponential backoff multiplier
+
+    def _next_proxy(self) -> str:
+        """Round-robin proxy from pool."""
+        if not self._proxy_pool:
+            return ""
+        proxy = self._proxy_pool[self._proxy_idx % len(self._proxy_pool)]
+        self._proxy_idx += 1
+        return proxy
 
     def _create_session(self) -> tls_client.Session:
         session = tls_client.Session(
@@ -69,11 +84,12 @@ class GmgnClient:
                 "User-Agent": self._ua.random,
             }
         )
-        # Apply proxy if configured
-        if self._proxy_url:
+        # Apply proxy from pool (round-robin)
+        proxy = self._next_proxy()
+        if proxy:
             session.proxies = {
-                "http": self._proxy_url,
-                "https": self._proxy_url,
+                "http": proxy,
+                "https": proxy,
             }
         return session
 

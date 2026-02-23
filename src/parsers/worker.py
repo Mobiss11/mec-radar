@@ -124,10 +124,17 @@ from src.parsers.llm_analyzer.client import LLMAnalyzerClient, LLMAnalysisResult
 async def run_parser() -> None:
     """Entry point — starts all parsers and enrichment worker."""
     gmgn_rate_limiter = RateLimiter(settings.gmgn_max_rps)
+    # Build proxy pool from comma-separated env + legacy single proxy
+    _proxy_pool = [p.strip() for p in settings.gmgn_proxy_pool.split(",") if p.strip()] if settings.gmgn_proxy_pool else []
     gmgn = GmgnClient(
         rate_limiter=gmgn_rate_limiter,
         proxy_url=settings.gmgn_proxy_url,
+        proxy_pool=_proxy_pool,
     )
+    if _proxy_pool:
+        logger.info(f"GMGN proxy pool: {len(_proxy_pool)} proxies (round-robin)")
+    elif settings.gmgn_proxy_url:
+        logger.info("GMGN single proxy configured")
     pumpportal = PumpPortalClient()
     dexscreener = DexScreenerClient(max_rps=settings.dexscreener_max_rps)
 

@@ -136,6 +136,8 @@ export interface PositionItem {
   source: string | null
   entry_price: number | null
   current_price: number | null
+  entry_mcap: number | null
+  current_mcap: number | null
   amount_sol_invested: number | null
   pnl_pct: number | null
   pnl_usd: number | null

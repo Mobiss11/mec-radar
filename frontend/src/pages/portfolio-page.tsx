@@ -7,7 +7,7 @@ import { AddressBadge } from "@/components/common/address-badge"
 import { EmptyState } from "@/components/common/empty-state"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
-import { formatPct, formatSol, formatUsd, timeAgo } from "@/lib/format"
+import { formatCompact, formatPct, formatSol, formatUsd, timeAgo } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import type { PortfolioMode } from "@/types/api"
 import {
@@ -51,29 +51,54 @@ const SUBTITLE: Record<PortfolioMode, string> = {
   all: "All trading combined",
 }
 
-/** Map raw token source to display label + color classes */
-function getSourceConfig(source: string | null | undefined): {
-  label: string
-  className: string
-} | null {
-  if (!source) return null
-  if (source.startsWith("pumpportal") || source === "pumpfun")
-    return { label: "pump.fun", className: "bg-fuchsia-500/15 text-fuchsia-400" }
-  if (source.startsWith("meteora"))
-    return { label: "meteora", className: "bg-cyan-500/15 text-cyan-400" }
-  if (source.startsWith("gmgn"))
-    return { label: "gmgn", className: "bg-emerald-500/15 text-emerald-400" }
-  if (source.startsWith("dexscreener"))
-    return { label: "dexscreener", className: "bg-amber-500/15 text-amber-400" }
-  if (source.startsWith("chainstack") || source === "grpc")
-    return { label: "gRPC", className: "bg-violet-500/15 text-violet-400" }
-  if (source === "raydium")
-    return { label: "raydium", className: "bg-sky-500/15 text-sky-400" }
-  return { label: source.slice(0, 12), className: "bg-muted text-muted-foreground" }
+/** Detect platform from token address suffix */
+function detectPlatform(address: string | null | undefined): string | null {
+  if (!address) return null
+  if (address.endsWith("pump")) return "pump.fun"
+  return null
 }
 
-function SourceBadge({ source }: { source: string | null }) {
-  const config = getSourceConfig(source)
+/** Map raw token source to display label + color classes */
+function getSourceConfig(
+  source: string | null | undefined,
+  address?: string | null,
+): { label: string; className: string } | null {
+  // Try address-based detection first (always accurate), then fallback to DB source
+  const platform = detectPlatform(address)
+
+  const effective = platform ?? source
+  if (!effective) return null
+
+  if (
+    effective === "pump.fun" ||
+    effective.startsWith("pumpportal") ||
+    effective === "pumpfun"
+  )
+    return { label: "pump.fun", className: "bg-fuchsia-500/15 text-fuchsia-400" }
+  if (effective.startsWith("meteora"))
+    return { label: "meteora", className: "bg-cyan-500/15 text-cyan-400" }
+  if (effective.startsWith("gmgn"))
+    return { label: "gmgn", className: "bg-emerald-500/15 text-emerald-400" }
+  if (effective.startsWith("dexscreener"))
+    return { label: "dexscreener", className: "bg-amber-500/15 text-amber-400" }
+  if (effective.startsWith("chainstack") || effective === "grpc")
+    return { label: "gRPC", className: "bg-violet-500/15 text-violet-400" }
+  if (effective === "raydium")
+    return { label: "raydium", className: "bg-sky-500/15 text-sky-400" }
+  return {
+    label: effective.slice(0, 12),
+    className: "bg-muted text-muted-foreground",
+  }
+}
+
+function SourceBadge({
+  source,
+  address,
+}: {
+  source: string | null
+  address?: string | null
+}) {
+  const config = getSourceConfig(source, address)
   if (!config) return null
   return (
     <span
@@ -365,7 +390,10 @@ export function PortfolioPage() {
                     </span>
                     <AddressBadge address={p.token_address as string} />
                     {/* Source badge (pump.fun, meteora, etc.) */}
-                    <SourceBadge source={p.source as string | null} />
+                    <SourceBadge
+                      source={p.source as string | null}
+                      address={p.token_address as string}
+                    />
                     {/* REAL badge for on-chain positions */}
                     {p.is_paper === false && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
@@ -387,6 +415,12 @@ export function PortfolioPage() {
                     {p.current_price != null && (
                       <span>
                         Now: {formatUsd(p.current_price as number)}
+                      </span>
+                    )}
+                    {(p.entry_mcap != null || p.current_mcap != null) && (
+                      <span className="text-muted-foreground/70">
+                        MC: {p.entry_mcap != null ? `$${formatCompact(p.entry_mcap as number)}` : "—"}
+                        {p.current_mcap != null && ` → $${formatCompact(p.current_mcap as number)}`}
                       </span>
                     )}
                     <span>{timeAgo((p.opened_at ?? p.closed_at) as string)}</span>

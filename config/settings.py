@@ -23,9 +23,10 @@ class Settings(BaseSettings):
     trading_enabled: bool = False
 
     # gmgn.ai
-    gmgn_parse_interval_sec: int = 60
-    gmgn_max_rps: float = 1.5
+    gmgn_parse_interval_sec: int = 5  # Default 5s for aggressive discovery
+    gmgn_max_rps: float = 5.0  # Raised for 5s polling with proxy pool
     gmgn_proxy_url: str = ""  # SOCKS5 or HTTP proxy for GMGN (rotating residential)
+    gmgn_proxy_pool: str = ""  # Comma-separated proxy URLs for round-robin rotation
 
     # DexScreener
     dexscreener_max_rps: float = 4.0

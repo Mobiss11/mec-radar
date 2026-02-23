@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.auth import verify_csrf_token
 from src.api.dependencies import get_current_user, get_session
 from src.api.metrics_registry import registry
-from src.models.token import Token
+from src.models.token import Token, TokenSnapshot
 from src.models.trade import Position, Trade
 
 router = APIRouter(prefix="/api/v1/portfolio", tags=["portfolio"])
@@ -149,6 +149,47 @@ async def list_positions(
             if row.token_id not in tx_hash_map:
                 tx_hash_map[row.token_id] = row.tx_hash
 
+    # Batch-load MCap: entry (first snapshot) + current (latest snapshot)
+    token_ids = list({p.token_id for p, _ in page})
+    entry_mcap_map: dict[int, float] = {}
+    current_mcap_map: dict[int, float] = {}
+    if token_ids:
+        # Entry MCap: first snapshot per token (min id)
+        min_snap = (
+            select(
+                TokenSnapshot.token_id,
+                func.min(TokenSnapshot.id).label("min_id"),
+            )
+            .where(TokenSnapshot.token_id.in_(token_ids))
+            .group_by(TokenSnapshot.token_id)
+            .subquery()
+        )
+        entry_result = await session.execute(
+            select(TokenSnapshot.token_id, TokenSnapshot.market_cap)
+            .join(min_snap, (TokenSnapshot.token_id == min_snap.c.token_id) & (TokenSnapshot.id == min_snap.c.min_id))
+        )
+        for row in entry_result.all():
+            if row.market_cap is not None:
+                entry_mcap_map[row.token_id] = float(row.market_cap)
+
+        # Current MCap: latest snapshot per token (max id)
+        max_snap = (
+            select(
+                TokenSnapshot.token_id,
+                func.max(TokenSnapshot.id).label("max_id"),
+            )
+            .where(TokenSnapshot.token_id.in_(token_ids))
+            .group_by(TokenSnapshot.token_id)
+            .subquery()
+        )
+        current_result = await session.execute(
+            select(TokenSnapshot.token_id, TokenSnapshot.market_cap)
+            .join(max_snap, (TokenSnapshot.token_id == max_snap.c.token_id) & (TokenSnapshot.id == max_snap.c.max_id))
+        )
+        for row in current_result.all():
+            if row.market_cap is not None:
+                current_mcap_map[row.token_id] = float(row.market_cap)
+
     items = []
     for p, token_source in page:
         items.append({
@@ -158,6 +199,8 @@ async def list_positions(
             "source": token_source,
             "entry_price": float(p.entry_price) if p.entry_price else None,
             "current_price": float(p.current_price) if p.current_price else None,
+            "entry_mcap": entry_mcap_map.get(p.token_id),
+            "current_mcap": current_mcap_map.get(p.token_id),
             "amount_sol_invested": float(p.amount_sol_invested) if p.amount_sol_invested else None,
             "pnl_pct": float(p.pnl_pct) if p.pnl_pct else None,
             "pnl_usd": float(p.pnl_usd) if p.pnl_usd else None,
