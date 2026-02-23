@@ -88,13 +88,15 @@ class RealTrader:
         """
         # Signal filter
         if signal.status not in ("strong_buy", "buy"):
+            logger.info(f"[REAL] Skipping signal {signal.token_address[:12]}: status={signal.status}")
             return None
         if price is None or price <= 0:
+            logger.warning(f"[REAL] Skipping signal {signal.token_address[:12]}: invalid price={price}")
             return None
 
         # Circuit breaker
         if self._circuit.is_tripped:
-            logger.debug("[REAL] Circuit breaker tripped, skipping trade")
+            logger.warning("[REAL] Circuit breaker tripped, skipping trade")
             return None
 
         # No duplicate position for same token
@@ -106,6 +108,7 @@ class RealTrader:
             )
         )
         if existing.scalar_one_or_none() is not None:
+            logger.info(f"[REAL] Duplicate position for {signal.token_address[:12]}, skipping")
             return None
 
         # Volume-weighted sizing

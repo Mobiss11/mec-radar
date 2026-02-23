@@ -58,15 +58,17 @@ class PaperTrader:
         Returns the new Position or None if skipped.
         """
         if signal.status not in ("strong_buy", "buy"):
+            logger.info(f"[PAPER] Skipping signal {signal.token_address[:12]}: status={signal.status}")
             return None
 
         if price is None or price <= 0:
+            logger.warning(f"[PAPER] Skipping signal {signal.token_address[:12]}: invalid price={price}")
             return None
 
         # Check max positions
         open_count = await self._count_open_positions(session)
         if open_count >= self._max_positions:
-            logger.debug("[PAPER] Max positions reached, skipping")
+            logger.warning(f"[PAPER] Max positions reached ({open_count}/{self._max_positions}), skipping {signal.token_address[:12]}")
             return None
 
         # No duplicate position for same token
@@ -78,6 +80,7 @@ class PaperTrader:
             )
         )
         if existing.scalar_one_or_none() is not None:
+            logger.info(f"[PAPER] Duplicate position for {signal.token_address[:12]}, skipping")
             return None
 
         # Volume-weighted entry: strong_buy = 1.5x, buy = 1.0x base size

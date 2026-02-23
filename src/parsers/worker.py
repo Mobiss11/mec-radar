@@ -3149,30 +3149,50 @@ async def _enrich_token(
                             await session.flush()  # get signal_record.id
                             from src.parsers.sol_price import get_sol_price_safe
                             _sol_price = get_sol_price_safe()
-                            await paper_trader.on_signal(
+                            logger.info(
+                                f"[PAPER] Calling on_signal for {token.symbol or task.address[:12]} "
+                                f"signal_id={signal_record.id} price={snapshot.price} "
+                                f"liq={snapshot.liquidity_usd} sol_price={_sol_price}"
+                            )
+                            pos = await paper_trader.on_signal(
                                 session, signal_record, snapshot.price,
                                 symbol=token.symbol,
                                 liquidity_usd=float(snapshot.liquidity_usd) if snapshot.liquidity_usd else None,
                                 sol_price_usd=_sol_price,
                             )
+                            if pos is None:
+                                logger.warning(
+                                    f"[PAPER] on_signal returned None for {token.symbol or task.address[:12]} "
+                                    f"(signal status={signal_record.status})"
+                                )
                         except Exception as e:
-                            logger.debug(f"[PAPER] Error opening position: {e}")
+                            logger.opt(exception=True).error(f"[PAPER] Error opening position: {e}")
                     # Real trading: open position on signal
                     if real_trader and sig.action in ("strong_buy", "buy"):
                         try:
                             await session.flush()
                             from src.parsers.sol_price import get_sol_price_safe
                             _sol_price_r = get_sol_price_safe()
-                            await real_trader.on_signal(
+                            logger.info(
+                                f"[REAL] Calling on_signal for {token.symbol or task.address[:12]} "
+                                f"signal_id={signal_record.id} price={snapshot.price} "
+                                f"liq={snapshot.liquidity_usd} sol_price={_sol_price_r}"
+                            )
+                            pos = await real_trader.on_signal(
                                 session, signal_record, snapshot.price,
                                 symbol=token.symbol,
                                 liquidity_usd=float(snapshot.liquidity_usd) if snapshot.liquidity_usd else None,
                                 sol_price_usd=_sol_price_r,
                             )
+                            if pos is None:
+                                logger.warning(
+                                    f"[REAL] on_signal returned None for {token.symbol or task.address[:12]} "
+                                    f"(signal status={signal_record.status})"
+                                )
                         except Exception as e:
-                            logger.warning(f"[REAL] Error opening position: {e}")
+                            logger.opt(exception=True).error(f"[REAL] Error opening position: {e}")
             except Exception as e:
-                logger.debug(f"[SIGNAL] Error generating signal: {e}")
+                logger.opt(exception=True).error(f"[SIGNAL] Error generating signal: {e}")
 
         # 15b. Paper trading: update existing positions with current price
         if paper_trader and snapshot is not None and snapshot.price:
