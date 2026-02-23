@@ -3143,17 +3143,9 @@ async def _enrich_token(
                                     source=token.source,
                                 )
                             )
-                    # Paper/Real trading: only open positions on INITIAL stage
-                    # MIN_5 signals are logged + alerted but NOT traded — by MIN_5
-                    # the price may have moved significantly from discovery
-                    _open_trade = task.stage == EnrichmentStage.INITIAL
-                    if not _open_trade and sig.action in ("strong_buy", "buy"):
-                        logger.info(
-                            f"[TRADE] Skipping position open for {token.symbol or task.address[:12]} "
-                            f"— signal on {task.stage.name} (only INITIAL opens trades)"
-                        )
+                    # Paper/Real trading: open on INITIAL + MIN_5 (both signal stages)
                     # Paper trading: open position on signal
-                    if _open_trade and paper_trader and sig.action in ("strong_buy", "buy"):
+                    if paper_trader and sig.action in ("strong_buy", "buy"):
                         try:
                             await session.flush()  # get signal_record.id
                             from src.parsers.sol_price import get_sol_price_safe
@@ -3177,15 +3169,39 @@ async def _enrich_token(
                         except Exception as e:
                             logger.opt(exception=True).error(f"[PAPER] Error opening position: {e}")
                     # Real trading: open position on signal
-                    if _open_trade and real_trader and sig.action in ("strong_buy", "buy"):
+                    # Safety: fetch fresh price from Jupiter before risking real SOL
+                    if real_trader and sig.action in ("strong_buy", "buy"):
                         try:
                             await session.flush()
                             from src.parsers.sol_price import get_sol_price_safe
                             _sol_price_r = get_sol_price_safe()
+
+                            # Pre-trade price sanity: get fresh Jupiter quote
+                            _fresh_price = None
+                            if jupiter:
+                                try:
+                                    _jp = await jupiter.get_price(task.address)
+                                    if _jp and _jp.price is not None:
+                                        _fresh_price = _jp.price
+                                except Exception:
+                                    pass
+
+                            if _fresh_price and snapshot.price and float(snapshot.price) > 0:
+                                _price_ratio = float(_fresh_price) / float(snapshot.price)
+                                if _price_ratio < 0.3 or _price_ratio > 3.0:
+                                    logger.warning(
+                                        f"[REAL] Price mismatch for {token.symbol or task.address[:12]}: "
+                                        f"snapshot={snapshot.price} jupiter={_fresh_price} "
+                                        f"ratio={_price_ratio:.2f} — skipping real trade"
+                                    )
+                                    # Don't open real trade — price is stale/inconsistent
+                                    raise ValueError("Price sanity check failed")
+
                             logger.info(
                                 f"[REAL] Calling on_signal for {token.symbol or task.address[:12]} "
                                 f"signal_id={signal_record.id} price={snapshot.price} "
-                                f"liq={snapshot.liquidity_usd} sol_price={_sol_price_r}"
+                                f"liq={snapshot.liquidity_usd} sol_price={_sol_price_r} "
+                                f"fresh_jup_price={_fresh_price}"
                             )
                             pos = await real_trader.on_signal(
                                 session, signal_record, snapshot.price,
