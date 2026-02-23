@@ -266,10 +266,19 @@ def evaluate_signals(
 
     # --- BEARISH RULES ---
 
-    # R10a: Soft low-liquidity penalty ($5K-$20K range)
-    # Not a hard gate — token can still pass if bullish signals are strong.
+    # R10a: Soft low-liquidity penalty — tiered (Phase 35).
+    # $5K-$8K: very thin pool, high rug risk → -3
+    # $8K-$20K: risky but many profitable trades here → -2 (unchanged)
     # Gapple case: liq=$14K, scored 68, pumped 3x. Hard gate killed it.
-    if 5_000 <= liq < 20_000:
+    # Backtest: 14 profitable with liq<$10K (punchDance +127%, SLC +113%).
+    if 5_000 <= liq < 8_000:
+        r = SignalRule(
+            "very_low_liquidity", -3,
+            f"Very low liquidity ${liq:,.0f} (thin pool, high rug risk)",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+    elif 8_000 <= liq < 20_000:
         r = SignalRule(
             "low_liquidity_soft", -2,
             f"Low liquidity ${liq:,.0f} (risky, but may pump)",
@@ -863,18 +872,31 @@ def evaluate_signals(
     # scammers AND legit creators — symbol alone cannot distinguish them.
     #
     # Tiered penalty: higher rug_count = heavier weight, but NEVER hard avoid.
-    if copycat_rugged and copycat_rug_count >= 3:
-        r = SignalRule(
-            "copycat_serial_scam", -8,
-            f"Symbol rugged {copycat_rug_count}x — high-frequency scam symbol",
-        )
-        fired.append(r)
-        reasons[r.name] = r.description
-    elif copycat_rugged:
-        r = SignalRule(
-            "copycat_rugged_symbol", -6,
-            "Symbol matches a recently rugged token (copycat scam)",
-        )
+    # Phase 35: Logarithmic scaling — higher rug_count = heavier penalty.
+    # CLEUS had 126 rugged addresses; -8 was overcome by bullish +12.
+    # New tiers: 50+ → -12, 10+ → -10, 3+ → -8, 1-2 → -6.
+    # Backtest: CLEUS +140% had rug_count ~1 → -6 (unchanged, not affected).
+    if copycat_rugged:
+        if copycat_rug_count >= 50:
+            r = SignalRule(
+                "copycat_mass_scam", -12,
+                f"Symbol rugged {copycat_rug_count}x — mass deployment scam",
+            )
+        elif copycat_rug_count >= 10:
+            r = SignalRule(
+                "copycat_extreme_scam", -10,
+                f"Symbol rugged {copycat_rug_count}x — extreme serial scam",
+            )
+        elif copycat_rug_count >= 3:
+            r = SignalRule(
+                "copycat_serial_scam", -8,
+                f"Symbol rugged {copycat_rug_count}x — high-frequency scam symbol",
+            )
+        else:
+            r = SignalRule(
+                "copycat_rugged_symbol", -6,
+                "Symbol matches a recently rugged token (copycat scam)",
+            )
         fired.append(r)
         reasons[r.name] = r.description
 

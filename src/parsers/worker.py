@@ -29,8 +29,17 @@ from loguru import logger
 # Read by _enrich_token before evaluate_signals() to penalize repeat scam symbols.
 # Phase 34: Migrated from in-memory dict to Redis hash for persistence across restarts.
 _RUGGED_SYMBOLS: dict[str, tuple[float, int]] = {}  # symbol_upper -> (monotonic_ts, rug_count)
-_RUGGED_SYMBOLS_TTL = 7200  # 2 hours
+_RUGGED_SYMBOLS_TTL = 7200  # 2 hours (base TTL)
 _RUGGED_SYMBOLS_REDIS_KEY = "antiscam:rugged_symbols"  # Redis hash: symbol -> "count:ts_unix"
+
+
+def _get_copycat_ttl(count: int) -> int:
+    """Phase 35: Count-dependent TTL — mass scam symbols tracked longer."""
+    if count >= 50:
+        return 21600  # 6 hours
+    if count >= 10:
+        return 14400  # 4 hours
+    return _RUGGED_SYMBOLS_TTL  # 2 hours
 
 from config.settings import settings
 from src.db.database import async_session_factory
@@ -148,7 +157,8 @@ async def _load_rugged_symbols_from_redis() -> None:
             count = int(parts[0])
             ts_unix = float(parts[1])
             age_seconds = now_unix - ts_unix
-            if age_seconds < _RUGGED_SYMBOLS_TTL:
+            _ttl = _get_copycat_ttl(count)
+            if age_seconds < _ttl:
                 # Convert unix time to monotonic-equivalent
                 mono_ts = now_mono - age_seconds
                 _RUGGED_SYMBOLS[sym.upper()] = (mono_ts, count)
@@ -201,7 +211,8 @@ def _check_copycat(symbol: str) -> tuple[bool, int]:
     if entry is None:
         return False, 0
     ts, count = entry
-    if (_time_mod.monotonic() - ts) >= _RUGGED_SYMBOLS_TTL:
+    _ttl = _get_copycat_ttl(count)
+    if (_time_mod.monotonic() - ts) >= _ttl:
         return False, 0
     return True, count
 
@@ -3633,9 +3644,10 @@ async def _paper_price_loop(
     from src.db.database import async_session_factory
     from src.models.trade import Position
 
-    await asyncio.sleep(30)  # Wait for positions to appear
+    await asyncio.sleep(10)  # Phase 35: was 30s — faster first check for new positions
 
     while True:
+        _interval = 15  # Default interval; overridden below for fresh positions
         try:
             async with async_session_factory() as session:
                 result = await session.execute(
@@ -3800,10 +3812,22 @@ async def _paper_price_loop(
                     if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
                         await _track_rugged_symbol(pos.symbol)
 
+            # Phase 35: Adaptive interval — 5s for fresh positions (< 120s old),
+            # 15s for mature. Fresh positions have highest rug risk; faster checks
+            # catch instant rugs and capture profit before LP removal.
+            from datetime import datetime, UTC
+            _now_dt = datetime.now(UTC).replace(tzinfo=None)
+            _has_fresh = any(
+                pos.opened_at and (_now_dt - pos.opened_at).total_seconds() < 120
+                for pos in positions
+            )
+            if _has_fresh:
+                _interval = 5
+
         except Exception as e:
             logger.warning(f"[PAPER] Price loop error: {e}")
 
-        await asyncio.sleep(15)  # Every 15 seconds
+        await asyncio.sleep(_interval)
 
 
 async def _paper_sweep_loop(paper_trader: "PaperTrader") -> None:
@@ -3862,8 +3886,9 @@ async def _real_price_loop(
     from src.models.trade import Position
 
     REAL_PRICE_INTERVAL = 10  # seconds — faster than paper for rug protection
+    REAL_PRICE_FAST = 5  # Phase 35: fast interval for fresh positions
 
-    await asyncio.sleep(30)
+    await asyncio.sleep(10)  # Phase 35: was 30s — faster first check
 
     while True:
         try:
@@ -3958,10 +3983,20 @@ async def _real_price_loop(
                 if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
                     await _track_rugged_symbol(pos.symbol)
 
+            # Phase 35: Adaptive interval for fresh positions
+            from datetime import datetime, UTC
+            _now_dt = datetime.now(UTC).replace(tzinfo=None)
+            _has_fresh = any(
+                pos.opened_at and (_now_dt - pos.opened_at).total_seconds() < 120
+                for pos in positions
+            )
+            _real_interval = REAL_PRICE_FAST if _has_fresh else REAL_PRICE_INTERVAL
+
         except Exception as e:
             logger.debug(f"[REAL] Price loop error: {e}")
+            _real_interval = REAL_PRICE_INTERVAL
 
-        await asyncio.sleep(REAL_PRICE_INTERVAL)
+        await asyncio.sleep(_real_interval)
 
 
 async def _real_sweep_loop(real_trader: "RealTrader") -> None:

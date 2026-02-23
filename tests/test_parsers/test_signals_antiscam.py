@@ -321,6 +321,42 @@ class TestCopycatRuggedSymbol:
         rule = [r for r in result.rules_fired if r.name == "copycat_serial_scam"]
         assert rule[0].weight == -8
 
+    def test_copycat_10_rugs_extreme_penalty(self):
+        """Phase 35: 10 prior rugs → -10 (new tier)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=10,
+        )
+        assert "copycat_extreme_scam" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "copycat_extreme_scam"]
+        assert rule[0].weight == -10
+
+    def test_copycat_50_rugs_mass_penalty(self):
+        """Phase 35: 50+ prior rugs → -12 (max tier)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=50,
+        )
+        assert "copycat_mass_scam" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "copycat_mass_scam"]
+        assert rule[0].weight == -12
+
+    def test_copycat_126_rugs_cleus_case(self):
+        """Phase 35: CLEUS with 126 rugged addresses → -12 mass scam."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=126,
+        )
+        assert "copycat_mass_scam" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "copycat_mass_scam"]
+        assert rule[0].weight == -12
+
     def test_copycat_2_rugs_still_single_tier(self):
         """2 prior rugs → -6 (single tier, serial starts at 3+)."""
         snapshot = _make_snapshot()
@@ -734,7 +770,7 @@ class TestScamTokensBlocked:
         assert result.bearish_score >= 6
 
     def test_scam_serial_copycat_heavy_penalty(self):
-        """Serial copycat (3+ rugs) → -8 penalty (but NOT hard avoid).
+        """Serial copycat (3-9 rugs) → -8 penalty (but NOT hard avoid).
 
         Backtest showed 86/153 profitable positions had 2+ rugs.
         Popular memes (MOSS, CLAW) produce both scams and profits.
@@ -759,6 +795,25 @@ class TestScamTokensBlocked:
         rule = [r for r in result.rules_fired if r.name == "copycat_serial_scam"]
         assert rule[0].weight == -8
 
+    def test_scam_mass_copycat_126_becomes_avoid(self):
+        """Phase 35: Mass copycat 126 rugs (-12) on weak token → avoid."""
+        snapshot = _make_snapshot(
+            holders_count=50,
+            score=50,
+        )
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=126,
+            raydium_lp_burned=False,
+            token_age_minutes=1.0,
+        )
+        assert "copycat_mass_scam" in result.reasons
+        # -12 copycat + -2 lp_not_burned + -3 unsecured_lp_fresh = -17 bearish
+        assert result.bearish_score >= 12
+        assert result.action == "avoid"
+
     def test_scam_bot_farmed_buys(self):
         """Bot-farmed token: 200 buys from 20 holders (ratio 10.0) → R65 fires."""
         snapshot = _make_snapshot(
@@ -771,3 +826,161 @@ class TestScamTokensBlocked:
             token_age_minutes=1.0,
         )
         assert "abnormal_buys_per_holder" in result.reasons
+
+
+# ── Phase 35: Liquidity split $5K-$8K vs $8K-$20K ──────────────────────
+
+
+class TestLiquiditySplit:
+    """Phase 35: R10a split — $5K-$8K → -3, $8K-$20K → -2."""
+
+    def test_liq_6k_very_low_penalty(self):
+        """$6K liquidity → very_low_liquidity -3."""
+        snapshot = _make_snapshot(liquidity_usd=6000)
+        result = evaluate_signals(snapshot, _make_security())
+        assert "very_low_liquidity" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "very_low_liquidity"]
+        assert len(rule) == 1
+        assert rule[0].weight == -3
+
+    def test_liq_8k_low_soft_penalty(self):
+        """$8K liquidity → low_liquidity_soft -2 (not -3)."""
+        snapshot = _make_snapshot(liquidity_usd=8000)
+        result = evaluate_signals(snapshot, _make_security())
+        assert "low_liquidity_soft" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "low_liquidity_soft"]
+        assert len(rule) == 1
+        assert rule[0].weight == -2
+
+    def test_liq_12k_low_soft_penalty(self):
+        """$12K liquidity → low_liquidity_soft -2."""
+        snapshot = _make_snapshot(liquidity_usd=12000)
+        result = evaluate_signals(snapshot, _make_security())
+        assert "low_liquidity_soft" in result.reasons
+
+    def test_liq_25k_no_penalty(self):
+        """$25K liquidity → no liquidity penalty."""
+        snapshot = _make_snapshot(liquidity_usd=25000)
+        result = evaluate_signals(snapshot, _make_security())
+        assert "very_low_liquidity" not in result.reasons
+        assert "low_liquidity_soft" not in result.reasons
+
+    def test_liq_4999_hard_reject(self):
+        """$4,999 liquidity → below $5K hard gate."""
+        snapshot = _make_snapshot(liquidity_usd=4999)
+        result = evaluate_signals(snapshot, _make_security())
+        # Below $5K → low_liquidity_gate fires (-10)
+        assert "low_liquidity_gate" in result.reasons
+        assert result.action == "avoid"
+
+
+# ── Phase 35: Backtest profitable tokens survive new rules ──────────────
+
+
+class TestPhase35BacktestProfitable:
+    """Backtest: verify profitable tokens are NOT blocked by Phase 35 changes.
+
+    Each test recreates real conditions from production profitable positions.
+    """
+
+    def test_punchdance_8k_liq_survives(self):
+        """punchDance: liq=$8,281, +127% profit → must NOT be blocked.
+
+        With R10a split: $8K-$20K → -2 (unchanged). Token had strong bullish.
+        """
+        snapshot = _make_snapshot(
+            liquidity_usd=8281,
+            holders_count=200,
+            score=65,
+            smart_wallets_count=3,
+            buys_5m=80,
+            buys_1h=300,
+            sells_1h=30,
+        )
+        sec = _make_security()
+        result = evaluate_signals(snapshot, sec, token_age_minutes=2.0)
+        # Must not be avoid
+        assert result.action != "avoid", (
+            f"punchDance-like token blocked! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )
+
+    def test_cleus_1_rug_survives(self):
+        """CLEUS with 1 rug count (+140% profit) → copycat -6, but strong bullish wins."""
+        snapshot = _make_snapshot(
+            holders_count=300,
+            score=75,
+            smart_wallets_count=4,
+            buys_5m=100,
+            buys_1h=400,
+            sells_1h=40,
+        )
+        sec = _make_security()
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=1,
+            token_age_minutes=2.0,
+        )
+        assert result.action != "avoid", (
+            f"CLEUS-like (1 rug) blocked! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )
+
+    def test_mirror_score0_survives(self):
+        """MIRROR: score=0 at INITIAL, +146% profit → must pass.
+
+        Score=0 is normal for most tokens at INITIAL stage.
+        """
+        snapshot = _make_snapshot(
+            liquidity_usd=30000,
+            holders_count=150,
+            score=0,
+            buys_5m=50,
+            buys_1h=200,
+            sells_1h=20,
+        )
+        sec = _make_security()
+        result = evaluate_signals(snapshot, sec, token_age_minutes=1.0)
+        assert result.action != "avoid", (
+            f"MIRROR-like (score=0) blocked! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )
+
+    def test_slc_low_liq_survives(self):
+        """SLC: liq=$7,200, +113% profit → $5K-$8K → -3, but bullish wins."""
+        snapshot = _make_snapshot(
+            liquidity_usd=7200,
+            holders_count=250,
+            score=70,
+            smart_wallets_count=3,
+            buys_5m=90,
+            buys_1h=350,
+            sells_1h=35,
+        )
+        sec = _make_security()
+        result = evaluate_signals(snapshot, sec, token_age_minutes=2.0)
+        assert result.action != "avoid", (
+            f"SLC-like token blocked! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )
+
+    def test_cleus_126_rugs_blocked(self):
+        """CLEUS ×126 (scam): 126 rugs → -12, weak token → avoid."""
+        snapshot = _make_snapshot(
+            holders_count=50,
+            score=45,
+            buys_5m=30,
+        )
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=126,
+            raydium_lp_burned=False,
+            token_age_minutes=1.0,
+        )
+        assert result.action == "avoid", (
+            f"CLEUS×126 NOT blocked! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )

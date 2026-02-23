@@ -72,12 +72,12 @@ class TestLowLiquidityGate:
         assert "low_liquidity_gate" in result.reasons
 
     def test_liq_5000_passes(self):
-        """$5,000 = at threshold → passes gate (soft penalty instead)."""
+        """$5,000 = at threshold → passes gate (very_low_liquidity -3 penalty)."""
         snapshot = _make_snapshot(liquidity_usd=Decimal("5000"))
         result = evaluate_signals(snapshot, _make_security())
         assert "low_liquidity_gate" not in result.reasons
-        # Gets soft penalty R10a instead
-        assert "low_liquidity_soft" in result.reasons
+        # Phase 35: $5K-$8K → very_low_liquidity -3 (was low_liquidity_soft -2)
+        assert "very_low_liquidity" in result.reasons
 
     def test_liq_20000_passes(self):
         """$20K liq → passes gate, no soft penalty."""
