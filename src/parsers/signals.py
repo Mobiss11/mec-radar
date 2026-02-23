@@ -258,12 +258,22 @@ def evaluate_signals(
 
     # --- PHASE 11 BEARISH RULES ---
 
-    # R15: Rugcheck danger — reduced from -4 to -2 because ~99% of fresh
-    # PumpFun memecoins score >= 50 ("Low LP Providers", "Mutable Metadata").
-    # At -4 this rule is noise that blocks all buy signals. Real protection
-    # comes from rugcheck_multi_danger (-3) for truly dangerous tokens.
+    # R15: Rugcheck danger — tiered penalty based on severity.
+    # score 50-5000: -2 (noise — "Low LP Providers", "Mutable Metadata")
+    # score 5000+: -5 (extreme — multiple critical dangers, rug pull likely)
+    # Production data: ALL drained tokens had rugcheck 3500-96000.
+    # Legit "noisy" memecoins rarely exceed 2000.
     if rugcheck_score is not None and rugcheck_score >= 50:
-        r = SignalRule("rugcheck_danger", -2, f"Rugcheck score {rugcheck_score} (dangerous)")
+        if rugcheck_score >= 5000:
+            r = SignalRule(
+                "rugcheck_danger", -5,
+                f"Rugcheck score {rugcheck_score} (extreme danger)",
+            )
+        else:
+            r = SignalRule(
+                "rugcheck_danger", -2,
+                f"Rugcheck score {rugcheck_score} (dangerous)",
+            )
         fired.append(r)
         reasons[r.name] = r.description
 
@@ -692,6 +702,8 @@ def evaluate_signals(
     # + more buys than sells on a very young token. This compensates for
     # R9 price_momentum which NEVER fires on INITIAL (no prev_snapshot).
     # MCap/Liq < 5 = healthy ratio, holders >= 15 at T+12s = organic growth.
+    # Phase 31: Skip if rugcheck >= 5000 — extreme danger tokens should NOT
+    # get bullish boost (graduation rug pattern).
     if (
         prev_snapshot is None  # Only fires when no previous snapshot (INITIAL)
         and token_age_minutes is not None
@@ -700,6 +712,7 @@ def evaluate_signals(
         and mcap / liq < 5  # Healthy ratio (not pumped beyond liquidity)
         and holders >= 15  # Decent holder count for <3 min old token
         and buys > sells  # Net buying pressure
+        and (rugcheck_score is None or rugcheck_score < 5000)  # Not extreme danger
     ):
         r = SignalRule(
             "early_organic_momentum", 3,
@@ -722,6 +735,52 @@ def evaluate_signals(
             "fresh_volume_surge", 2,
             f"Fresh volume surge: 5m vol/liq = {vol_5m_check/liq:.1f}x "
             f"at {token_age_minutes:.1f}m age",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # --- PHASE 31 ANTI-RUG RULES ---
+    # Production data (2026-02-23): 15/19 positions drained in 10-40s.
+    # Pattern: PumpFun tokens graduate to Raydium with ~85 SOL ($174K liq),
+    # mcap ≈ liq, rugger bots holders/buys to trigger bullish signals,
+    # then instantly drain the Raydium pool. All had rugcheck >3500.
+
+    # R57: PumpFun graduation rug pattern — mcap/liq ≈ 1.0 means token
+    # JUST graduated from bonding curve. Combined with high rugcheck = trap.
+    # Legitimate graduated tokens trade and diverge mcap/liq quickly.
+    if (
+        liq > 50_000
+        and mcap > 0
+        and liq > 0
+        and 0.8 <= mcap / liq <= 1.8  # Freshly graduated — mcap ≈ liq
+        and rugcheck_score is not None
+        and rugcheck_score >= 3000  # Known danger level
+        and token_age_minutes is not None
+        and token_age_minutes <= 5  # Very fresh — hasn't diverged yet
+    ):
+        r = SignalRule(
+            "graduation_rug_pattern", -5,
+            f"Graduation trap: MCap/Liq={mcap/liq:.2f}x, "
+            f"rugcheck={rugcheck_score}, age={token_age_minutes:.1f}m",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # R58: Suspicious bot-farmed holders — extreme holder growth on very
+    # young token. Organic tokens at <2min old rarely see >500% growth.
+    # Scam pattern: create fake holders to trigger R53 explosive_holder_growth.
+    if (
+        holder_growth_pct is not None
+        and holder_growth_pct >= 500
+        and token_age_minutes is not None
+        and token_age_minutes <= 2  # Very fresh
+        and rugcheck_score is not None
+        and rugcheck_score >= 3000  # Cross-validate with rugcheck danger
+    ):
+        r = SignalRule(
+            "bot_holder_farming", -3,
+            f"Suspicious holder growth +{holder_growth_pct:.0f}% in "
+            f"{token_age_minutes:.1f}m with rugcheck={rugcheck_score}",
         )
         fired.append(r)
         reasons[r.name] = r.description
