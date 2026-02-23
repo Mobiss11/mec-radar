@@ -188,35 +188,41 @@ class PersistentEnrichmentQueue:
         """Try to pop the highest-priority ready task from Redis.
 
         Score = priority * 1e12 + stage_bucket * 0.5e12 + scheduled_at.
-        We scan up to 50 candidates from the front of the sorted set and pick
-        the first one whose scheduled_at <= now.  This avoids the starvation
-        problem where future-scheduled bucket-0 tasks (HOUR_1, MIN_30) block
-        ready bucket-1 tasks (PRE_SCAN) that sit further back in the set.
+
+        We query each (priority, bucket) band directly via zrangebyscore,
+        checking bands in priority order:
+          1. priority=0 bucket=0 (INITIAL+ migration)   — scores [0, now]
+          2. priority=0 bucket=1 (PRE_SCAN migration)    — scores [0.5e12, 0.5e12+now]
+          3. priority=1 bucket=0 (INITIAL+ normal)       — scores [1e12, 1e12+now]
+          4. priority=1 bucket=1 (PRE_SCAN normal)       — scores [1.5e12, 1.5e12+now]
+
+        This avoids scanning through future-scheduled tasks that sit at the
+        front of the sorted set but aren't ready yet.
         """
         now = asyncio.get_event_loop().time()
+        max_ts = now + 2.0  # Allow near-ready tasks (within 2s)
 
-        # Fetch a batch of candidates (lowest scores first).
-        # 50 is enough: at most ~20-30 future tasks sit ahead of ready ones.
-        results = await self._redis.zrange(
-            REDIS_KEY_QUEUE, 0, 49, withscores=True,
-        )
-        if not results:
-            return None
+        # Each band: (base_score_min, base_score_max_for_ready_tasks)
+        bands = [
+            (0,       max_ts),                  # priority=0, bucket=0
+            (0.5e12,  0.5e12 + max_ts),         # priority=0, bucket=1
+            (1e12,    1e12 + max_ts),            # priority=1, bucket=0
+            (1.5e12,  1.5e12 + max_ts),          # priority=1, bucket=1
+        ]
 
-        for tid, score in results:
-            # Extract scheduled_at from score
-            priority = int(score // 1e12)
-            remainder = score - priority * 1e12
-            stage_bucket = int(remainder // 0.5e12)
-            scheduled_at = remainder - stage_bucket * 0.5e12
+        for min_score, max_score in bands:
+            results = await self._redis.zrangebyscore(
+                REDIS_KEY_QUEUE, min_score, max_score, start=0, num=1,
+            )
+            if not results:
+                continue
 
-            if scheduled_at > now + 2.0:
-                continue  # Not ready — skip, try next candidate
+            tid = results[0]
 
-            # This task is ready (or within 2s). Pop atomically.
+            # Pop atomically
             removed = await self._redis.zrem(REDIS_KEY_QUEUE, tid)
             if not removed:
-                continue  # Another worker got it — try next
+                continue  # Another worker got it — try next band
 
             task_json = await self._redis.hget(REDIS_KEY_TASKS, tid)
             await self._redis.hdel(REDIS_KEY_TASKS, tid)
@@ -226,7 +232,7 @@ class PersistentEnrichmentQueue:
 
             return _dict_to_task(json.loads(task_json))
 
-        return None  # No ready tasks in the first 50 candidates
+        return None  # No ready tasks in any band
 
     async def qsize(self) -> int:
         """Approximate queue size."""
