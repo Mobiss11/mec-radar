@@ -423,6 +423,14 @@ export function PortfolioPage() {
                         {p.current_mcap != null && ` → $${formatCompact(p.current_mcap as number)}`}
                       </span>
                     )}
+                    {p.current_liq != null && (
+                      <span className={cn(
+                        "text-muted-foreground/70",
+                        (p.current_liq as number) < 1000 && "text-red-400 font-semibold",
+                      )}>
+                        Liq: ${formatCompact(p.current_liq as number)}
+                      </span>
+                    )}
                     <span>{timeAgo((p.opened_at ?? p.closed_at) as string)}</span>
                     <a
                       href={`https://gmgn.ai/sol/token/${p.token_address}`}

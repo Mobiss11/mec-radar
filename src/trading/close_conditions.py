@@ -23,10 +23,12 @@ def check_close_conditions(
     take_profit_x: float = 2.0,
     stop_loss_pct: float = -50.0,
     timeout_hours: int = 8,
+    liquidity_usd: float | None = None,
 ) -> str | None:
     """Check if position should be closed. Returns reason string or None.
 
     Close logic (aggressive profit capture for memecoins):
+    0. Liquidity removed → immediate close (can't sell, total loss)
     1. Rug detected → immediate close
     2. Stop loss: -50% from entry → close
     3. Take profit: >= 2x from entry → close (capture gains before dump)
@@ -34,6 +36,10 @@ def check_close_conditions(
     5. Early stop: if < -20% after 30 minutes → close early (not recovering)
     6. Timeout: hours max → close
     """
+    # Liquidity removed — pool is dead, tokens unsellable
+    if liquidity_usd is not None and liquidity_usd < 100:
+        return "liquidity_removed"
+
     if is_rug:
         return "rug"
 

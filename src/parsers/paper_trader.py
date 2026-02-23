@@ -198,8 +198,10 @@ class PaperTrader:
                     # Convert SOL P&L to USD (SOL * pnl% * sol_price)
                     pos.pnl_usd = pos.amount_sol_invested * pnl_pct / 100 * _sol_usd
 
-            # Check close conditions
-            close_reason = self._check_close_conditions(pos, current_price, is_rug, now)
+            # Check close conditions (pass liquidity for LP removal detection)
+            close_reason = self._check_close_conditions(
+                pos, current_price, is_rug, now, liquidity_usd=liquidity_usd,
+            )
             if close_reason:
                 await self._close_position(
                     session, pos, close_reason, current_price,
@@ -213,6 +215,7 @@ class PaperTrader:
         current_price: Decimal,
         is_rug: bool,
         now: datetime,
+        liquidity_usd: float | None = None,
     ) -> str | None:
         """Check if position should be closed. Returns reason or None.
 
@@ -226,6 +229,7 @@ class PaperTrader:
             take_profit_x=self._take_profit_x,
             stop_loss_pct=self._stop_loss_pct,
             timeout_hours=self._timeout_hours,
+            liquidity_usd=liquidity_usd,
         )
 
     async def _close_position(
@@ -245,6 +249,29 @@ class PaperTrader:
         pos.close_reason = reason
         pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
         pos.current_price = price
+
+        # Liquidity removed = total loss (can't sell, pool is dead)
+        if reason == "liquidity_removed":
+            _sol_usd = Decimal(str(sol_price_usd))
+            pos.pnl_pct = Decimal("-100")
+            pos.pnl_usd = -(pos.amount_sol_invested or Decimal("0")) * _sol_usd
+            trade = Trade(
+                signal_id=pos.signal_id,
+                token_id=pos.token_id,
+                token_address=pos.token_address,
+                side="sell",
+                amount_sol=Decimal("0"),
+                amount_token=pos.amount_token,
+                price=Decimal("0"),
+                is_paper=1,
+                status="filled",
+            )
+            session.add(trade)
+            logger.warning(
+                f"[PAPER] Closed {pos.token_address[:12]} reason=liquidity_removed "
+                f"P&L=-100% (pool dead, tokens unsellable)"
+            )
+            return
 
         # Create sell trade (amount_sol = exit value, not entry)
         exit_sol = pos.amount_sol_invested or Decimal("0")

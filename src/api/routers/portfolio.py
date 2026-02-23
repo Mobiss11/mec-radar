@@ -172,7 +172,7 @@ async def list_positions(
             if row.market_cap is not None:
                 entry_mcap_map[row.token_id] = float(row.market_cap)
 
-        # Current MCap: latest snapshot per token (max id)
+        # Current MCap + Liquidity: latest snapshot per token (max id)
         max_snap = (
             select(
                 TokenSnapshot.token_id,
@@ -183,12 +183,21 @@ async def list_positions(
             .subquery()
         )
         current_result = await session.execute(
-            select(TokenSnapshot.token_id, TokenSnapshot.market_cap)
+            select(
+                TokenSnapshot.token_id,
+                TokenSnapshot.market_cap,
+                TokenSnapshot.liquidity_usd,
+                TokenSnapshot.dex_liquidity_usd,
+            )
             .join(max_snap, (TokenSnapshot.token_id == max_snap.c.token_id) & (TokenSnapshot.id == max_snap.c.max_id))
         )
+        current_liq_map: dict[int, float] = {}
         for row in current_result.all():
             if row.market_cap is not None:
                 current_mcap_map[row.token_id] = float(row.market_cap)
+            liq_val = row.liquidity_usd or row.dex_liquidity_usd
+            if liq_val is not None:
+                current_liq_map[row.token_id] = float(liq_val)
 
     items = []
     for p, token_source in page:
@@ -201,6 +210,7 @@ async def list_positions(
             "current_price": float(p.current_price) if p.current_price else None,
             "entry_mcap": entry_mcap_map.get(p.token_id),
             "current_mcap": current_mcap_map.get(p.token_id),
+            "current_liq": current_liq_map.get(p.token_id),
             "amount_sol_invested": float(p.amount_sol_invested) if p.amount_sol_invested else None,
             "pnl_pct": float(p.pnl_pct) if p.pnl_pct else None,
             "pnl_usd": float(p.pnl_usd) if p.pnl_usd else None,

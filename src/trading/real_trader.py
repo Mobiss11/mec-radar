@@ -288,6 +288,7 @@ class RealTrader:
                 take_profit_x=self._take_profit_x,
                 stop_loss_pct=self._stop_loss_pct,
                 timeout_hours=self._timeout_hours,
+                liquidity_usd=liquidity_usd,
             )
             if close_reason:
                 await self._execute_close(
