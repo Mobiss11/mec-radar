@@ -82,6 +82,8 @@ def evaluate_signals(
     holder_growth_pct: float | None = None,
     # Cross-validation
     solsniffer_score: int | None = None,
+    # Phase 33 — anti-scam v2
+    copycat_rugged: bool = False,
 ) -> SignalResult:
     """Evaluate all signal rules against enriched data.
 
@@ -125,6 +127,56 @@ def evaluate_signals(
         gate_rule = SignalRule(
             "extreme_mcap_liq_gate", -10,
             f"Hard gate: MCap/Liq ratio {mcap/liq:.1f}x > 10 (no exit liquidity)",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
+
+    # HG3 REMOVED: holders <= 2 hard gate had false positives in production
+    # (Golem +145%, PolyClaw +137%, SIXCODES +101.6% — all had 1-2 holders).
+    # Low holders are now handled by R60 soft penalty (-3 for holders <= 5).
+
+    # R61: Compound scam fingerprint — if 3+ red flags fire simultaneously,
+    # the token is almost certainly a rug. Each flag is individually weak
+    # (common on fresh tokens), but 3+ combined is statistically impossible
+    # on good tokens. Production: 0% false positive rate at 3+ flags.
+    _scam_flags = 0
+    _scam_details: list[str] = []
+
+    if (raydium_lp_burned is not None and not raydium_lp_burned
+            and security and not security.lp_burned and not security.lp_locked):
+        _scam_flags += 1
+        _scam_details.append("LP_unsecured")
+
+    if security and security.is_mintable is True:
+        _scam_flags += 1
+        _scam_details.append("mintable")
+
+    if bundled_buy_detected:
+        _scam_flags += 1
+        _scam_details.append("bundled_buy")
+
+    if rugcheck_danger_count is not None and rugcheck_danger_count >= 2:
+        _scam_flags += 1
+        _scam_details.append(f"rugcheck_{rugcheck_danger_count}_dangers")
+
+    if pumpfun_dead_tokens is not None and pumpfun_dead_tokens >= 3:
+        _scam_flags += 1
+        _scam_details.append(f"serial_{pumpfun_dead_tokens}_dead")
+
+    if fee_payer_sybil_score is not None and fee_payer_sybil_score > 0.3:
+        _scam_flags += 1
+        _scam_details.append(f"sybil_{fee_payer_sybil_score:.0%}")
+
+    if _scam_flags >= 3:
+        gate_rule = SignalRule(
+            "compound_scam_fingerprint", -10,
+            f"Compound scam: {_scam_flags} flags ({', '.join(_scam_details)})",
         )
         return SignalResult(
             rules_fired=[gate_rule],
@@ -253,6 +305,17 @@ def evaluate_signals(
     # R14: High sell tax
     if security and security.sell_tax is not None and security.sell_tax > Decimal("10"):
         r = SignalRule("high_sell_tax", -3, f"Sell tax {float(security.sell_tax):.0f}%")
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # R60: Low holder count — very few real participants at evaluation time.
+    # Production: 21.8% scam vs 3.7% good at holders <= 5 (5.9x ratio).
+    # -3 is strong but not a hard gate — strong bullish can overcome.
+    if 0 < holders <= 5:
+        r = SignalRule(
+            "low_holders", -3,
+            f"Very few holders ({holders}) — likely bot-inflated or empty",
+        )
         fired.append(r)
         reasons[r.name] = r.description
 
@@ -408,23 +471,50 @@ def evaluate_signals(
         reasons[r.name] = r.description
 
     # R26: Serial deployer (creator has many dead tokens)
-    if pumpfun_dead_tokens is not None and pumpfun_dead_tokens >= 5:
+    # Phase 33: lowered threshold from 5 to 3 — production data shows
+    # "Creator history of rugged tokens" in 14 scams vs 3 good (4.7x ratio).
+    if pumpfun_dead_tokens is not None and pumpfun_dead_tokens >= 3:
         r = SignalRule(
             "serial_deployer", -3,
             f"Creator has {pumpfun_dead_tokens} dead tokens on pump.fun",
         )
         fired.append(r)
         reasons[r.name] = r.description
+    # R64: Mild serial deployer — 2 dead tokens is suspicious but not conclusive.
+    elif pumpfun_dead_tokens is not None and pumpfun_dead_tokens >= 2:
+        r = SignalRule(
+            "serial_deployer_mild", -2,
+            f"Creator has {pumpfun_dead_tokens} dead tokens (suspicious)",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
 
-    # R27: LP not burned (Raydium verified)
+    # R27: LP not burned (Raydium verified) — Phase 33: weight -1 → -2.
+    # -1 was trivially overcome by any single bullish rule. -2 is meaningful.
     if raydium_lp_burned is not None and not raydium_lp_burned:
         if security and not security.lp_burned and not security.lp_locked:
             r = SignalRule(
-                "lp_not_burned", -1,
+                "lp_not_burned", -2,
                 "LP not burned or locked (Raydium verified)",
             )
             fired.append(r)
             reasons[r.name] = r.description
+
+    # R62: Unsecured LP on fresh token — much stronger penalty than R27 alone.
+    # Stacks with R27 (-2): combined -5 for fresh unsecured LP tokens.
+    # Age < 10min AND holders < 30 prevents hitting established tokens.
+    if (
+        raydium_lp_burned is not None and not raydium_lp_burned
+        and security and not security.lp_burned and not security.lp_locked
+        and token_age_minutes is not None and token_age_minutes < 10
+        and holders < 30
+    ):
+        r = SignalRule(
+            "unsecured_lp_fresh", -3,
+            f"Unsecured LP on fresh token ({token_age_minutes:.1f}m, {holders} holders)",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
 
     # R28: GoPlus honeypot confirmation
     if goplus_is_honeypot is True:
@@ -735,6 +825,20 @@ def evaluate_signals(
             "fresh_volume_surge", 2,
             f"Fresh volume surge: 5m vol/liq = {vol_5m_check/liq:.1f}x "
             f"at {token_age_minutes:.1f}m age",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # --- PHASE 33 COPYCAT RULE ---
+
+    # R63: Copycat rugged symbol — same symbol was already rugged recently.
+    # Production: CASH (9 addrs, all -100%), ELSTONKS (8 addrs, all -100%).
+    # Scammers deploy the same symbol repeatedly, draining LP each time.
+    # -6 is heavy but not a hard gate — allows through if overwhelmingly bullish.
+    if copycat_rugged:
+        r = SignalRule(
+            "copycat_rugged_symbol", -6,
+            "Symbol matches a recently rugged token (copycat scam)",
         )
         fired.append(r)
         reasons[r.name] = r.description

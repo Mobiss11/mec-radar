@@ -17,10 +17,17 @@ Phase 14D: INITIAL stage uses asyncio.gather() for parallel API calls:
 """
 
 import asyncio
+import time as _time_mod
 from datetime import datetime
 from decimal import Decimal
 
 from loguru import logger
+
+# Phase 33: Copycat symbol tracking — in-memory dict of recently rugged symbols.
+# Updated by _paper_price_loop and _real_price_loop when liquidity_removed fires.
+# Read by _enrich_token before evaluate_signals() to penalize repeat scam symbols.
+_RUGGED_SYMBOLS: dict[str, float] = {}  # symbol_upper -> monotonic timestamp
+_RUGGED_SYMBOLS_TTL = 7200  # 2 hours
 
 from config.settings import settings
 from src.db.database import async_session_factory
@@ -3053,6 +3060,14 @@ async def _enrich_token(
                     _age_delta = datetime.utcnow() - token.first_seen_at  # noqa: DTZ003 — DB uses naive UTC
                     _token_age_min = _age_delta.total_seconds() / 60.0
 
+                # Phase 33: Check copycat symbol in rugged symbols dict
+                _copycat_rugged = False
+                if token.symbol:
+                    _sym_ts = _RUGGED_SYMBOLS.get(token.symbol.upper())
+                    if _sym_ts and (_time_mod.monotonic() - _sym_ts) < _RUGGED_SYMBOLS_TTL:
+                        _copycat_rugged = True
+                        logger.info(f"[COPYCAT] {token.symbol} matches recently rugged symbol")
+
                 sig = evaluate_signals(
                     snapshot,
                     security_data_for_signal,
@@ -3099,6 +3114,8 @@ async def _enrich_token(
                     holder_growth_pct=holder_growth_pct_val,
                     # Cross-validation
                     solsniffer_score=solsniffer_score_val,
+                    # Phase 33 — anti-scam v2
+                    copycat_rugged=_copycat_rugged,
                 )
                 logger.info(
                     f"[SIGNAL] {token.symbol or task.address[:12]} "
@@ -3695,6 +3712,16 @@ async def _paper_price_loop(
                         )
                     await session.commit()
 
+                # Phase 33: Track rugged symbols for copycat detection (R63).
+                # If liquidity < $5K for a position, it was closed as liquidity_removed.
+                for pos in positions:
+                    _pos_liq = live_liq_map.get(pos.token_id)
+                    if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
+                        _sym_upper = pos.symbol.upper()
+                        if _sym_upper not in _RUGGED_SYMBOLS:
+                            logger.info(f"[COPYCAT] Tracking rugged symbol: {pos.symbol}")
+                        _RUGGED_SYMBOLS[_sym_upper] = _time_mod.monotonic()
+
         except Exception as e:
             logger.warning(f"[PAPER] Price loop error: {e}")
 
@@ -3846,6 +3873,15 @@ async def _real_price_loop(
                         sol_price_usd=_sol_usd,
                     )
                 await session.commit()
+
+            # Phase 33: Track rugged symbols for copycat detection (R63).
+            for pos in positions:
+                _pos_liq = live_liq_map.get(pos.token_id)
+                if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
+                    _sym_upper = pos.symbol.upper()
+                    if _sym_upper not in _RUGGED_SYMBOLS:
+                        logger.info(f"[COPYCAT] Tracking rugged symbol (real): {pos.symbol}")
+                    _RUGGED_SYMBOLS[_sym_upper] = _time_mod.monotonic()
 
         except Exception as e:
             logger.debug(f"[REAL] Price loop error: {e}")
