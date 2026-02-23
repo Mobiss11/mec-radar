@@ -59,7 +59,7 @@ STAGE_SCHEDULE: dict[EnrichmentStage, StageConfig] = {
         run_prescan=True,
     ),
     EnrichmentStage.INITIAL: StageConfig(
-        offset_sec=25,  # +25s — faster signal while data still usable
+        offset_sec=12,  # +12s — Birdeye indexes in 3-5s, data ready by T+10
         fetch_gmgn_info=True,
         fetch_security=True,
         fetch_top_holders=True,
