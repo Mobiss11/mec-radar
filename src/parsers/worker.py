@@ -3143,8 +3143,17 @@ async def _enrich_token(
                                     source=token.source,
                                 )
                             )
+                    # Paper/Real trading: only open positions on INITIAL stage
+                    # MIN_5 signals are logged + alerted but NOT traded — by MIN_5
+                    # the price may have moved significantly from discovery
+                    _open_trade = task.stage == EnrichmentStage.INITIAL
+                    if not _open_trade and sig.action in ("strong_buy", "buy"):
+                        logger.info(
+                            f"[TRADE] Skipping position open for {token.symbol or task.address[:12]} "
+                            f"— signal on {task.stage.name} (only INITIAL opens trades)"
+                        )
                     # Paper trading: open position on signal
-                    if paper_trader and sig.action in ("strong_buy", "buy"):
+                    if _open_trade and paper_trader and sig.action in ("strong_buy", "buy"):
                         try:
                             await session.flush()  # get signal_record.id
                             from src.parsers.sol_price import get_sol_price_safe
@@ -3168,7 +3177,7 @@ async def _enrich_token(
                         except Exception as e:
                             logger.opt(exception=True).error(f"[PAPER] Error opening position: {e}")
                     # Real trading: open position on signal
-                    if real_trader and sig.action in ("strong_buy", "buy"):
+                    if _open_trade and real_trader and sig.action in ("strong_buy", "buy"):
                         try:
                             await session.flush()
                             from src.parsers.sol_price import get_sol_price_safe
