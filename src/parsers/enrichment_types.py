@@ -15,8 +15,8 @@ class EnrichmentStage(IntEnum):
     """Enrichment stages with delay offsets from discovery time."""
 
     PRE_SCAN = -1  # +5s — instant reject obvious scams (Phase 12)
-    INITIAL = 0  # +45s — full baseline
-    MIN_2 = 1  # +45s — quick DexScreener price check (was 2m, reduced for fast entry)
+    INITIAL = 0  # +8s — full baseline (Birdeye ready by T+5s)
+    MIN_2 = 1  # +25s — quick DexScreener price check (was 2m→45s→25s for fast entry)
     MIN_5 = 2  # +5m — holder shift, prune low-score
     MIN_10 = 3  # +10m — price trajectory
     MIN_15 = 4  # +15m — deep gmgn check, prune
@@ -59,7 +59,7 @@ STAGE_SCHEDULE: dict[EnrichmentStage, StageConfig] = {
         run_prescan=True,
     ),
     EnrichmentStage.INITIAL: StageConfig(
-        offset_sec=12,  # +12s — Birdeye indexes in 3-5s, data ready by T+10
+        offset_sec=8,   # +8s — Birdeye proven at T+5s (PRE_SCAN), data ready by T+6
         fetch_gmgn_info=True,
         fetch_security=True,
         fetch_top_holders=True,
@@ -67,7 +67,7 @@ STAGE_SCHEDULE: dict[EnrichmentStage, StageConfig] = {
         fetch_metadata=True,
     ),
     EnrichmentStage.MIN_2: StageConfig(
-        offset_sec=45,  # Reduced from 120s to 45s — median lost potential was 108s
+        offset_sec=25,  # Reduced from 45s to 25s — profitable entries at T+27-40s, catch 15s earlier
         fetch_gmgn_info=True,  # quick price check for early pump/dump detection
         fetch_dexscreener=True,
     ),
