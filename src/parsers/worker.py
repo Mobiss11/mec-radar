@@ -653,7 +653,7 @@ async def run_parser() -> None:
         if birdeye or jupiter:
             tasks.append(
                 asyncio.create_task(
-                    _paper_price_loop(paper_trader, birdeye=birdeye, jupiter=jupiter),
+                    _paper_price_loop(paper_trader, birdeye=birdeye, jupiter=jupiter, dexscreener=dexscreener),
                     name="paper_price",
                 )
             )
@@ -3425,10 +3425,12 @@ async def _paper_price_loop(
     paper_trader: "PaperTrader",
     birdeye: "BirdeyeClient | None" = None,
     jupiter: "JupiterClient | None" = None,
+    dexscreener: "DexScreenerClient | None" = None,
 ) -> None:
     """Real-time price updates for open paper positions.
 
-    Uses Birdeye multi-price (primary) with Jupiter batch (fallback).
+    Uses Birdeye multi-price (primary), Jupiter batch (fallback),
+    and DexScreener (fallback for pump.fun bonding curve tokens).
     Runs every 15 seconds, fetches prices for all open positions in one batch call,
     and triggers take_profit/stop_loss checks with fresh prices.
     """
@@ -3467,9 +3469,9 @@ async def _paper_price_loop(
                         if bp and bp.value:
                             token_prices[pos.token_id] = bp.value
                 except Exception as e:
-                    logger.debug(f"[PAPER] Birdeye multi-price failed: {e}")
+                    logger.warning(f"[PAPER] Birdeye multi-price failed: {e}")
 
-            # Fallback: Jupiter batch for any missing tokens
+            # Fallback 1: Jupiter batch for any missing tokens
             missing_addrs = [p.token_address for p in positions if p.token_id not in token_prices]
             if jupiter and missing_addrs:
                 try:
@@ -3480,7 +3482,31 @@ async def _paper_price_loop(
                             if jp and jp.price:
                                 token_prices[pos.token_id] = jp.price
                 except Exception as e:
-                    logger.debug(f"[PAPER] Jupiter batch fallback failed: {e}")
+                    logger.warning(f"[PAPER] Jupiter batch fallback failed: {e}")
+
+            # Fallback 2: DexScreener for pump.fun tokens still missing
+            missing_addrs2 = [p.token_address for p in positions if p.token_id not in token_prices]
+            if dexscreener and missing_addrs2:
+                try:
+                    from decimal import Decimal as _Dec
+                    dex_pairs = await dexscreener.get_tokens_batch(missing_addrs2[:30])
+                    # Build address→price map from DexScreener
+                    dex_price_map: dict[str, _Dec] = {}
+                    for pair in dex_pairs:
+                        if pair.priceUsd and pair.baseToken and pair.baseToken.address:
+                            try:
+                                dex_price_map[pair.baseToken.address] = _Dec(pair.priceUsd)
+                            except Exception:
+                                pass
+                    for pos in positions:
+                        if pos.token_id not in token_prices:
+                            dp = dex_price_map.get(pos.token_address)
+                            if dp and dp > 0:
+                                token_prices[pos.token_id] = dp
+                    if dex_price_map:
+                        logger.info(f"[PAPER] DexScreener fallback got {len(dex_price_map)} prices for {len(missing_addrs2)} missing tokens")
+                except Exception as e:
+                    logger.warning(f"[PAPER] DexScreener fallback failed: {e}")
 
             if not token_prices:
                 await asyncio.sleep(15)
@@ -3532,7 +3558,7 @@ async def _paper_price_loop(
                     await session.commit()
 
         except Exception as e:
-            logger.debug(f"[PAPER] Price loop error: {e}")
+            logger.warning(f"[PAPER] Price loop error: {e}")
 
         await asyncio.sleep(15)  # Every 15 seconds
 
