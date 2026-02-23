@@ -143,9 +143,9 @@ class Settings(BaseSettings):
     chainstack_grpc_token: str = ""
     enable_grpc_streaming: bool = True  # gRPC = sub-second discovery, PumpPortal is fallback
 
-    # Vybe Network (paid plan — 500K credits)
+    # Vybe Network — DISABLED: holder PnL now computed from GMGN data (free)
     vybe_api_key: str = ""
-    enable_vybe: bool = True
+    enable_vybe: bool = False
 
     # TwitterAPI.io (paid — $10/1M credits)
     twitter_api_key: str = ""

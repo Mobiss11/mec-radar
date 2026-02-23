@@ -114,7 +114,8 @@ from src.parsers.wallet_age import check_wallet_ages
 from src.parsers.lp_events import detect_lp_events_onchain
 # Phase 15: Paid API integrations
 from src.parsers.chainstack.grpc_client import ChainstackGrpcClient
-from src.parsers.vybe.client import VybeClient
+# VybeClient import removed — holder PnL now computed from GMGN data
+# VybeTokenHoldersPnL model still used as data container (imported locally)
 from src.parsers.twitter.client import TwitterClient
 from src.parsers.website_checker import check_website, WebsiteCheckResult
 from src.parsers.telegram_checker.client import TelegramCheckerClient, TelegramCheckResult
@@ -203,11 +204,9 @@ async def run_parser() -> None:
         )
         logger.info("Chainstack gRPC streaming enabled (sub-second latency)")
 
-    # Phase 15: Vybe Network client
-    vybe: VybeClient | None = None
-    if settings.enable_vybe and settings.vybe_api_key:
-        vybe = VybeClient(api_key=settings.vybe_api_key)
-        logger.info("Vybe Network enabled (holder PnL)")
+    # Phase 15: Vybe Network — DISABLED, holder PnL now computed from GMGN data
+    # Kept import for VybeTokenHoldersPnL model (used as data container)
+    vybe = None  # noqa: F841
 
     # Phase 15: TwitterAPI.io client
     twitter: TwitterClient | None = None
@@ -940,7 +939,7 @@ async def _enrichment_worker(
     goplus: GoPlusClient | None = None,
     pumpfun: PumpfunClient | None = None,
     raydium: RaydiumClient | None = None,
-    vybe: VybeClient | None = None,
+    vybe: "VybeClient | None" = None,  # Disabled — holder PnL from GMGN
     twitter: TwitterClient | None = None,
     tg_checker: TelegramCheckerClient | None = None,
     llm_analyzer: LLMAnalyzerClient | None = None,
@@ -1250,7 +1249,7 @@ async def _enrich_token(
     goplus: GoPlusClient | None = None,
     pumpfun: PumpfunClient | None = None,
     raydium: RaydiumClient | None = None,
-    vybe: VybeClient | None = None,
+    vybe: "VybeClient | None" = None,  # Disabled — holder PnL from GMGN
     twitter: TwitterClient | None = None,
     tg_checker: TelegramCheckerClient | None = None,
     llm_analyzer: LLMAnalyzerClient | None = None,
@@ -1944,25 +1943,38 @@ async def _enrich_token(
                     logger.debug(f"[ENRICH] Metaplex check failed: {e}")
                 return 0, None, False
 
-            # Phase 15: Vybe holder PnL analysis (max 5 holders to conserve credits)
+            # Phase 15: Holder PnL analysis — computed from GMGN holders (no API call)
+            # Previously used Vybe Network API, now derived from GMGN data for free
             async def _fetch_vybe_pnl() -> "VybeTokenHoldersPnL | None":
-                if not vybe:
-                    return None
-                # Skip Vybe for tokens that failed PRE_SCAN or have high risk
-                if task.prescan_risk_boost >= settings.vybe_prescan_risk_gate:
+                # Compute from GMGN holders already fetched in Batch 1
+                if not holders:
                     return None
                 try:
                     from src.parsers.vybe.models import VybeTokenHoldersPnL
-                    result = await vybe.analyze_holders_pnl(task.address, max_holders=settings.vybe_max_holders_pnl)
+                    holders_with_pnl = [h for h in holders if h.pnl is not None]
+                    if not holders_with_pnl:
+                        return None
+                    in_profit = sum(1 for h in holders_with_pnl if h.pnl > 0)
+                    in_loss = len(holders_with_pnl) - in_profit
+                    pct = in_profit / len(holders_with_pnl) * 100 if holders_with_pnl else 0
+                    top_pct = float(holders[0].percentage or 0) if holders else 0
+                    result = VybeTokenHoldersPnL(
+                        total_holders_checked=len(holders_with_pnl),
+                        holders_in_profit=in_profit,
+                        holders_in_loss=in_loss,
+                        holders_in_profit_pct=pct,
+                        avg_pnl_usd=0.0,  # GMGN doesn't provide USD PnL, not used in scoring
+                        top_holder_pct=top_pct,
+                    )
                     if result.total_holders_checked > 0:
                         logger.info(
-                            f"[VYBE] {token.symbol or task.address[:12]} "
+                            f"[GMGN-PNL] {token.symbol or task.address[:12]} "
                             f"holders_in_profit={result.holders_in_profit_pct:.0f}% "
                             f"({result.holders_in_profit}/{result.total_holders_checked})"
                         )
                     return result
                 except Exception as e:
-                    logger.debug(f"[ENRICH] Vybe PnL failed: {e}")
+                    logger.debug(f"[ENRICH] GMGN holder PnL calc failed: {e}")
                     return None
 
             # Phase 15: Twitter social signals (skip tokens without searchable name)
@@ -2387,6 +2399,12 @@ async def _enrich_token(
             if holders:
                 total_pct = sum(h.percentage or Decimal(0) for h in holders[:10])
                 top10_pct = total_pct
+                # Compute holder PnL from GMGN data (replaces Vybe for non-INITIAL)
+                _h_with_pnl = [h for h in holders if h.pnl is not None]
+                if _h_with_pnl:
+                    _in_profit = sum(1 for h in _h_with_pnl if h.pnl > 0)
+                    holders_in_profit_pct_val = _in_profit / len(_h_with_pnl) * 100
+                    vybe_top_holder_pct_val = float(holders[0].percentage or 0)
 
             # Save OHLCV and trades
             if ohlcv_items:
