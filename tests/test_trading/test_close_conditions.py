@@ -408,3 +408,77 @@ def test_close_take_profit_before_trailing_stop():
         pos, Decimal("2.00"), is_rug=False, now=datetime.now(UTC)
     )
     assert result == "take_profit"
+
+
+# ── Liquidity removed ─────────────────────────────────────────────────
+
+
+def test_close_liquidity_removed_zero():
+    """Zero liquidity triggers liquidity_removed close."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
+        liquidity_usd=0.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_close_liquidity_removed_below_threshold():
+    """Liquidity below $5000 triggers liquidity_removed."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
+        liquidity_usd=4999.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_close_liquidity_none_does_not_trigger():
+    """None liquidity should NOT trigger close (unknown, not zero)."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
+        liquidity_usd=None,
+    )
+    assert result is None
+
+
+def test_close_liquidity_above_threshold_no_close():
+    """Liquidity above $5000 should NOT trigger close."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
+        liquidity_usd=5000.0,
+    )
+    assert result is None
+
+
+def test_close_liquidity_removed_takes_priority():
+    """Liquidity removal should fire before all other checks."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("3.00"),
+        opened_at=datetime.now(UTC) - timedelta(hours=1),
+    )
+    # At 3x price (take_profit would fire), but liq=0 should fire first
+    result = check_close_conditions(
+        pos, Decimal("3.00"), is_rug=False, now=datetime.now(UTC),
+        liquidity_usd=0.0,
+    )
+    assert result == "liquidity_removed"
