@@ -491,9 +491,12 @@ def evaluate_signals(
     # --- PHASE 14B BEARISH RULES ---
 
     # R37: Jito bundle snipe detected
+    # Reduced from -6 to -3: many legit tokens have small snipers (2-3 bots)
+    # which shouldn't kill the signal entirely. Large coordinated attacks
+    # are still caught by fee_payer_sybil (-6) and other rules.
     if jito_bundle_detected:
         r = SignalRule(
-            "jito_bundle_snipe", -6,
+            "jito_bundle_snipe", -3,
             "Jito MEV bundle snipe detected in first block",
         )
         fired.append(r)

@@ -2997,9 +2997,10 @@ async def _enrich_token(
                         f"delta={score - score_v3:+d} stage={task.stage.name}"
                     )
 
-        # 15. Generate entry signal (INITIAL + MIN_5 stages for early detection)
-        # MIN_5 gives a second chance with more complete data if INITIAL missed.
-        _signal_stages = {EnrichmentStage.INITIAL, EnrichmentStage.MIN_5}
+        # 15. Generate entry signal (INITIAL + MIN_2 + MIN_5 for early detection)
+        # MIN_2 catches fast movers missed at INITIAL (score=0 → score=49 in 2min)
+        # MIN_5 gives a third chance with more complete data.
+        _signal_stages = {EnrichmentStage.INITIAL, EnrichmentStage.MIN_2, EnrichmentStage.MIN_5}
         if (
             snapshot is not None
             and score is not None
