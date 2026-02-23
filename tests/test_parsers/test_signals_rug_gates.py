@@ -640,54 +640,105 @@ class TestAntiRugRules:
         result = evaluate_signals(snapshot, _make_security(), rugcheck_score=None)
         assert "rugcheck_danger" not in result.reasons
 
-    # --- R57 Graduation Rug Pattern ---
+    # --- R57a: Structural Graduation Rug (Phase 31b) ---
 
-    def test_r57_pankun_pattern(self):
-        """Real rug: Pan-kun — liq=$174K, mcap=$261K, rugcheck=9601, age=0.8m."""
+    def test_r57a_structural_graduation_174k(self):
+        """Real drain: $174K liq, mcap/liq=1.5, age<1m → R57a fires (-7)."""
         snapshot = _make_snapshot(
-            liquidity_usd=Decimal("174190"),
-            market_cap=Decimal("261324"),
+            liquidity_usd=Decimal("174544"),
+            market_cap=Decimal("261877"),
         )
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=9601,
             token_age_minutes=0.8,
+        )
+        assert "graduation_rug_structural" in result.reasons
+        rule = next(r for r in result.rules_fired if r.name == "graduation_rug_structural")
+        assert rule.weight == -7
+
+    def test_r57a_structural_graduation_221k(self):
+        """Real drain: TrenchHous $221K liq → R57a fires without rugcheck."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("221474"),
+            market_cap=Decimal("332154"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=0.8,
+            rugcheck_score=None,  # No rugcheck data
+        )
+        assert "graduation_rug_structural" in result.reasons
+
+    def test_r57a_not_on_low_liq(self):
+        """Profitable token: $14K liq → R57a does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("14444"),
+            market_cap=Decimal("8389"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=0.8,
+        )
+        assert "graduation_rug_structural" not in result.reasons
+
+    def test_r57a_not_on_diverged_ratio(self):
+        """R57a does NOT fire when mcap/liq > 2.0 (traded, diverged)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("500000"),  # ratio 2.87x
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=0.8,
+        )
+        assert "graduation_rug_structural" not in result.reasons
+
+    def test_r57a_not_on_old_token(self):
+        """R57a does NOT fire on token older than 3 minutes."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=4.0,
+        )
+        assert "graduation_rug_structural" not in result.reasons
+
+    def test_r57a_vole_drain(self):
+        """Real drain: VOLE $174K, drained in 5 seconds."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174628"),
+            market_cap=Decimal("261969"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=0.8,
+        )
+        assert "graduation_rug_structural" in result.reasons
+
+    # --- R57b: Original Graduation Rug (elif, $50-100K) ---
+
+    def test_r57b_medium_pool_with_rugcheck(self):
+        """$75K pool with high rugcheck → R57b fires (-5)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("75000"),
+            market_cap=Decimal("90000"),  # ratio 1.2x
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            rugcheck_score=11500,
+            token_age_minutes=1.0,
         )
         assert "graduation_rug_pattern" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "graduation_rug_pattern")
         assert rule.weight == -5
 
-    def test_r57_joe_pattern(self):
-        """Real rug: Joe — liq=$174K, mcap=$261K, rugcheck=96001, age=0.8m."""
+    def test_r57b_not_on_low_rugcheck(self):
+        """$75K pool with low rugcheck → R57b does NOT fire."""
         snapshot = _make_snapshot(
-            liquidity_usd=Decimal("174207"),
-            market_cap=Decimal("261669"),
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            rugcheck_score=96001,
-            token_age_minutes=0.8,
-        )
-        assert "graduation_rug_pattern" in result.reasons
-
-    def test_r57_not_on_old_token(self):
-        """R57 does NOT fire on token older than 5 minutes."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("174000"),
-            market_cap=Decimal("261000"),
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            rugcheck_score=11500,
-            token_age_minutes=6.0,
-        )
-        assert "graduation_rug_pattern" not in result.reasons
-
-    def test_r57_not_on_low_rugcheck(self):
-        """R57 does NOT fire when rugcheck < 3000 (normal level)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("174000"),
-            market_cap=Decimal("261000"),
+            liquidity_usd=Decimal("75000"),
+            market_cap=Decimal("90000"),
         )
         result = evaluate_signals(
             snapshot, _make_security(),
@@ -696,21 +747,22 @@ class TestAntiRugRules:
         )
         assert "graduation_rug_pattern" not in result.reasons
 
-    def test_r57_not_on_diverged_mcap_liq(self):
-        """R57 does NOT fire when mcap/liq > 1.8 (already traded, not fresh graduation)."""
+    def test_r57a_preempts_r57b(self):
+        """$174K pool → R57a fires, R57b does NOT (elif)."""
         snapshot = _make_snapshot(
-            liquidity_usd=Decimal("100000"),
-            market_cap=Decimal("250000"),  # ratio 2.5x — organic trading happened
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
         )
         result = evaluate_signals(
             snapshot, _make_security(),
             rugcheck_score=11500,
-            token_age_minutes=1.0,
+            token_age_minutes=0.8,
         )
+        assert "graduation_rug_structural" in result.reasons
         assert "graduation_rug_pattern" not in result.reasons
 
     def test_r57_not_on_small_pool(self):
-        """R57 does NOT fire on small pools < $50K liq (not graduation pattern)."""
+        """R57b does NOT fire on small pools < $50K liq."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("15000"),
@@ -721,45 +773,51 @@ class TestAntiRugRules:
             token_age_minutes=1.0,
         )
         assert "graduation_rug_pattern" not in result.reasons
+        assert "graduation_rug_structural" not in result.reasons
 
-    def test_r57_legit_graduated_passes(self):
-        """Legit graduated token — liq=$174K, mcap=$261K, rugcheck=200, age=1m.
-        Low rugcheck → R57 does NOT fire → bullish rules can win."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("174000"),
-            market_cap=Decimal("261000"),
-            holders_count=200,
-            buys_1h=500,
-            sells_1h=100,
-            score=65,
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            rugcheck_score=200,
-            token_age_minutes=1.0,
-            holder_velocity=200.0,
-        )
-        assert "graduation_rug_pattern" not in result.reasons
-        # Legitimate token can still get buy signal
-        assert result.net_score > 0
-
-    # --- R58 Bot Holder Farming ---
+    # --- R58 Bot Holder Farming (Phase 31b: removed rugcheck, added liq floor) ---
 
     def test_r58_bot_farming_detected(self):
-        """Extreme holder growth +5100% in 0.8m with high rugcheck → suspicious."""
+        """Holder growth +5100% in 0.8m on $174K pool → suspicious."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174000"),
             market_cap=Decimal("261000"),
         )
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=9601,
             holder_growth_pct=5100.0,
             token_age_minutes=0.8,
         )
         assert "bot_holder_farming" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "bot_holder_farming")
         assert rule.weight == -3
+
+    def test_r58_fires_without_rugcheck(self):
+        """R58 fires WITHOUT rugcheck (Phase 31b: removed dependency)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("50000"),
+            market_cap=Decimal("75000"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            rugcheck_score=None,  # No rugcheck!
+            holder_growth_pct=600.0,
+            token_age_minutes=1.0,
+        )
+        assert "bot_holder_farming" in result.reasons
+
+    def test_r58_not_on_low_liq(self):
+        """R58 does NOT fire on low-liq pool (floor $20K prevents false positives)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("14000"),
+            market_cap=Decimal("8000"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=800.0,
+            token_age_minutes=1.0,
+        )
+        assert "bot_holder_farming" not in result.reasons
 
     def test_r58_not_on_low_growth(self):
         """R58 does NOT fire on moderate holder growth (<500%)."""
@@ -769,7 +827,6 @@ class TestAntiRugRules:
         )
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=11500,
             holder_growth_pct=300.0,
             token_age_minutes=1.0,
         )
@@ -780,35 +837,172 @@ class TestAntiRugRules:
         snapshot = _make_snapshot()
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=11500,
             holder_growth_pct=5000.0,
             token_age_minutes=3.0,
         )
         assert "bot_holder_farming" not in result.reasons
 
-    def test_r58_not_without_rugcheck_danger(self):
-        """R58 does NOT fire when rugcheck < 3000 (avoid punishing organic growth)."""
-        snapshot = _make_snapshot()
+    # --- R59: Extreme Graduation Growth (Phase 31b NEW) ---
+
+    def test_r59_extreme_growth_on_graduation(self):
+        """Holder growth +6650% on $174K pool → R59 fires (-6)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
+        )
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=500,
-            holder_growth_pct=5000.0,
-            token_age_minutes=1.0,
+            holder_growth_pct=6650.0,
+            token_age_minutes=0.8,
         )
-        assert "bot_holder_farming" not in result.reasons
+        assert "extreme_graduation_growth" in result.reasons
+        rule = next(r for r in result.rules_fired if r.name == "extreme_graduation_growth")
+        assert rule.weight == -6
 
-    # --- Combined: Real Rug Scenario Replay ---
+    def test_r59_derp_drain(self):
+        """Real drain: derp — growth +9650% on $214K pool → R59 fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("214739"),
+            market_cap=Decimal("322148"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=9650.0,
+            token_age_minutes=0.8,
+        )
+        assert "extreme_graduation_growth" in result.reasons
 
-    def test_pankun_full_scenario_not_strong_buy(self):
-        """Pan-kun full scenario: was STRONG_BUY (net=10), now should be ≤ watch.
+    def test_r59_not_on_low_liq(self):
+        """Profitable Sandcat — growth +2031% but liq=$13.6K → NOT caught."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13600"),
+            market_cap=Decimal("11000"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=2031.0,
+            token_age_minutes=0.8,
+        )
+        assert "extreme_graduation_growth" not in result.reasons
 
-        Before: holder_velocity(+2) + strong_liquidity(+2) + price_momentum(+2)
-                + holder_acceleration(+3) + explosive_holder_growth(+3) = bull 12
-                - rugcheck_danger(-2) = net 10 → STRONG_BUY
+    def test_r59_not_on_moderate_growth(self):
+        """R59 does NOT fire when holder growth < 3000%."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=2500.0,
+            token_age_minutes=0.8,
+        )
+        assert "extreme_graduation_growth" not in result.reasons
 
-        After:  bull 12
-                - rugcheck_danger(-5) - graduation_rug_pattern(-5) = bear 10
-                → net 2 = WATCH (not entering!)
+    def test_r59_not_on_old_token(self):
+        """R59 does NOT fire on token older than 3 minutes."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=6000.0,
+            token_age_minutes=4.0,
+        )
+        assert "extreme_graduation_growth" not in result.reasons
+
+    # --- Graduation Zone Net Cap (Phase 31b) ---
+
+    def test_graduation_cap_limits_net(self):
+        """Even with net=15 from bullish, graduation zone caps to net=2 (watch)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
+            holders_count=200,
+            buys_1h=500,
+            sells_1h=50,
+            score=65,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=0.8,
+            holder_velocity=200.0,
+        )
+        assert result.net_score <= 2
+        assert result.action in ("watch", "avoid")
+
+    def test_graduation_cap_not_on_low_liq(self):
+        """$40K pool → no graduation cap, bullish rules can win."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("40000"),
+            market_cap=Decimal("25000"),
+            holders_count=200,
+            buys_1h=500,
+            sells_1h=50,
+            score=65,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=0.8,
+            holder_velocity=200.0,
+        )
+        # No cap applied — can reach buy/strong_buy
+        assert result.net_score > 2
+
+    def test_graduation_cap_not_on_old_token(self):
+        """$174K pool but age > 3min → no cap (token has traded, diverged)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("174000"),
+            market_cap=Decimal("261000"),
+            holders_count=200,
+            buys_1h=500,
+            sells_1h=50,
+            score=65,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=5.0,
+            holder_velocity=200.0,
+        )
+        # R57a won't fire (age > 3min), cap won't apply
+        assert "graduation_rug_structural" not in result.reasons
+
+    # --- Combined: Real Scenario Replays ---
+
+    def test_agent1c_graduation_drain_blocked(self):
+        """Real drain: agent1c at $201K, holder_growth +5450% → fully blocked.
+
+        R57a(-7) + R59(-6) + R58(-3) + graduation cap = impossible to buy.
+        """
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("201018"),
+            market_cap=Decimal("301576"),
+            holders_count=111,
+            buys_1h=66,
+            sells_1h=10,
+            score=52,
+        )
+        prev = _make_snapshot(
+            liquidity_usd=Decimal("201000"),
+            holders_count=2,
+            price=Decimal("0.00030"),
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            prev_snapshot=prev,
+            token_age_minutes=0.8,
+            holder_velocity=198.0,
+            holder_growth_pct=5450.0,
+        )
+        assert result.action in ("watch", "avoid")
+        assert "graduation_rug_structural" in result.reasons
+        assert "extreme_graduation_growth" in result.reasons
+        assert result.net_score <= 2
+
+    def test_pankun_full_scenario_blocked(self):
+        """Pan-kun graduation: liq=$174K → blocked by R57a + cap.
+
+        Phase 31b: R57a(-7) alone is heavy. With graduation cap → max watch.
         """
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174190"),
@@ -831,9 +1025,92 @@ class TestAntiRugRules:
             holder_velocity=185.0,
             holder_growth_pct=5100.0,
         )
-        assert result.action != "strong_buy"
-        assert "graduation_rug_pattern" in result.reasons
-        assert "rugcheck_danger" in result.reasons
-        # Verify rugcheck_danger is -5 (extreme tier), not -2
-        rc_rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
-        assert rc_rule.weight == -5
+        assert result.action in ("watch", "avoid")
+        assert "graduation_rug_structural" in result.reasons
+        assert result.net_score <= 2
+
+    # --- Backtest: Profitable Tokens NOT Blocked ---
+
+    def test_profitable_hua_hua_not_blocked(self):
+        """Real profit: Hua Hua +102% at liq=$14.4K → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("14444"),
+            market_cap=Decimal("8389"),
+            holders_count=299,
+            buys_1h=359,
+            sells_1h=60,
+            score=53,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            rugcheck_score=11500,
+            holder_growth_pct=1561.0,
+            token_age_minutes=0.8,
+            holder_velocity=511.0,
+        )
+        # No graduation rules fire (liq < $100K)
+        assert "graduation_rug_structural" not in result.reasons
+        assert "extreme_graduation_growth" not in result.reasons
+        # R58 doesn't fire (liq < $20K)
+        assert "bot_holder_farming" not in result.reasons
+        # Can still reach buy/strong_buy
+        assert result.action in ("buy", "strong_buy", "watch")
+
+    def test_profitable_cash_not_blocked(self):
+        """Real profit: CASH +111% at liq=$12.6K → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("12611"),
+            market_cap=Decimal("59224"),
+            holders_count=96,
+            buys_1h=137,
+            sells_1h=32,
+            score=40,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            rugcheck_score=2001,
+            token_age_minutes=0.8,
+        )
+        assert "graduation_rug_structural" not in result.reasons
+        assert "bot_holder_farming" not in result.reasons
+
+    def test_profitable_pankun_lowliq_not_blocked(self):
+        """Real profit: Pan-kun +107% at liq=$13.8K → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13801"),
+            market_cap=Decimal("30429"),
+            holders_count=90,
+            buys_1h=128,
+            sells_1h=20,
+            score=53,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            rugcheck_score=11500,
+            holder_growth_pct=429.0,
+            token_age_minutes=0.8,
+            holder_velocity=133.0,
+        )
+        assert "graduation_rug_structural" not in result.reasons
+        assert "extreme_graduation_growth" not in result.reasons
+        # R58: growth 429% < 500 → doesn't fire
+        assert "bot_holder_farming" not in result.reasons
+
+    def test_profitable_agent1c_lowliq_not_blocked(self):
+        """Real profit: agent1c +124% at liq=$14.3K → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("14274"),
+            market_cap=Decimal("12611"),
+            holders_count=269,
+            buys_1h=339,
+            sells_1h=58,
+            score=53,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            rugcheck_score=15357,
+            token_age_minutes=0.8,
+            holder_velocity=194.0,
+        )
+        assert "graduation_rug_structural" not in result.reasons
+        assert "bot_holder_farming" not in result.reasons

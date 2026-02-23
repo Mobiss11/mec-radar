@@ -739,24 +739,46 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
-    # --- PHASE 31 ANTI-RUG RULES ---
-    # Production data (2026-02-23): 15/19 positions drained in 10-40s.
-    # Pattern: PumpFun tokens graduate to Raydium with ~85 SOL ($174K liq),
-    # mcap ≈ liq, rugger bots holders/buys to trigger bullish signals,
-    # then instantly drain the Raydium pool. All had rugcheck >3500.
+    # --- PHASE 31/31b ANTI-RUG RULES ---
+    # Production data (2026-02-23 10:21-11:18 UTC): graduation drain pattern.
+    # PumpFun tokens graduate to Raydium with ~85/$98 SOL ($174K/$201K/$221K liq),
+    # mcap/liq ≈ 1.5x, rugger bots holders/buys to trigger bullish signals,
+    # then instantly drain the pool in 5-19 seconds.
+    # Phase 31b backtest: 0/11 profitable entries blocked, 4/4 drains caught.
 
-    # R57: PumpFun graduation rug pattern — mcap/liq ≈ 1.0 means token
-    # JUST graduated from bonding curve. Combined with high rugcheck = trap.
-    # Legitimate graduated tokens trade and diverge mcap/liq quickly.
-    if (
+    # Helper: detect graduation zone (used by multiple rules + cap)
+    _is_graduation_zone = (
+        liq > 100_000
+        and mcap > 0
+        and liq > 0
+        and 1.0 <= mcap / liq <= 2.0
+        and token_age_minutes is not None
+        and token_age_minutes <= 3
+    )
+
+    # R57a: Structural graduation rug fingerprint — NO rugcheck needed.
+    # All graduation drains have liq=$174K/$201K/$221K, mcap/liq≈1.5, age<1min.
+    # All profitable entries had liq $6.8K-$23.8K — never in this zone.
+    if _is_graduation_zone:
+        r = SignalRule(
+            "graduation_rug_structural", -7,
+            f"Graduation bomb: liq=${liq:,.0f}, MCap/Liq={mcap/liq:.2f}x, "
+            f"age={token_age_minutes:.1f}m",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # R57b: Original R57 for $50-100K pools with high rugcheck (elif — only
+    # fires if R57a didn't).
+    elif (
         liq > 50_000
         and mcap > 0
         and liq > 0
-        and 0.8 <= mcap / liq <= 1.8  # Freshly graduated — mcap ≈ liq
+        and 0.8 <= mcap / liq <= 1.8
         and rugcheck_score is not None
-        and rugcheck_score >= 3000  # Known danger level
+        and rugcheck_score >= 3000
         and token_age_minutes is not None
-        and token_age_minutes <= 5  # Very fresh — hasn't diverged yet
+        and token_age_minutes <= 5
     ):
         r = SignalRule(
             "graduation_rug_pattern", -5,
@@ -766,21 +788,40 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
-    # R58: Suspicious bot-farmed holders — extreme holder growth on very
-    # young token. Organic tokens at <2min old rarely see >500% growth.
-    # Scam pattern: create fake holders to trigger R53 explosive_holder_growth.
+    # R58: Bot-farmed holders — removed rugcheck dependency, added liq floor.
+    # Production showed rugcheck bypasses (score=2401, or missing).
+    # Liq floor $20K prevents penalizing organic low-liq tokens where
+    # holder growth % is high simply from tiny starting count (5→30 = +500%).
     if (
         holder_growth_pct is not None
         and holder_growth_pct >= 500
         and token_age_minutes is not None
-        and token_age_minutes <= 2  # Very fresh
-        and rugcheck_score is not None
-        and rugcheck_score >= 3000  # Cross-validate with rugcheck danger
+        and token_age_minutes <= 2
+        and liq > 20_000  # Floor: organic low-liq tokens safe
     ):
         r = SignalRule(
             "bot_holder_farming", -3,
             f"Suspicious holder growth +{holder_growth_pct:.0f}% in "
-            f"{token_age_minutes:.1f}m with rugcheck={rugcheck_score}",
+            f"{token_age_minutes:.1f}m, liq=${liq:,.0f}",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # R59: Extreme holder growth on graduation pool — catches tokens where
+    # R57a fires but botted holders also push bullish rules.
+    # Threshold 3000% has 1000% margin above max profitable (Sandcat 2031%).
+    # Liq > $50K ensures low-liq organics ($5-14K) never hit this.
+    if (
+        holder_growth_pct is not None
+        and holder_growth_pct >= 3000
+        and liq > 50_000
+        and token_age_minutes is not None
+        and token_age_minutes <= 3
+    ):
+        r = SignalRule(
+            "extreme_graduation_growth", -6,
+            f"Extreme growth +{holder_growth_pct:.0f}% on ${liq:,.0f} pool "
+            f"at {token_age_minutes:.1f}m age",
         )
         fired.append(r)
         reasons[r.name] = r.description
@@ -789,6 +830,13 @@ def evaluate_signals(
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))
     net = bullish - bearish
+
+    # Graduation zone hard cap: even if bullish rules stack to net=15,
+    # a freshly-graduated token with liq>$100K and mcap/liq≈1.5 can NOT
+    # get buy/strong_buy. Max "watch" (net=2). Safety net for edge cases
+    # where bearish rules don't accumulate enough weight.
+    if _is_graduation_zone and net > 2:
+        net = 2
 
     if net >= 8:
         action = "strong_buy"
