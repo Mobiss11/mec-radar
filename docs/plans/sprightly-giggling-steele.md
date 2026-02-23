@@ -1,161 +1,102 @@
-# Phase 37: Fix False `liquidity_removed` Closes
+# Phase 38: Anti-Scam — Compound Copycat Guard + Fresh Unsecured LP Cap
 
 ## Context
 
-57% of positions today (387/681) closed as `liquidity_removed` on LIVE tokens. Root cause: **Birdeye `multi_price` with `include_liquidity=true` returns bonding curve liquidity** (near-zero after DEX migration), not the real DEX pool liquidity. Price is correct (from DEX), but liquidity field references the dead bonding curve.
+After Phase 37 fixed false `liquidity_removed` from bad liquidity data, the **remaining problem is positions OPENING on scam tokens**:
 
-Evidence from SXAL/LOBCHURCH:
-- SXAL: liq=$64K (enrichment snapshot) → $0.02 (Birdeye multi_price) while price ROSE
-- LOBCHURCH: liq=$50K → $0.07 while price stable
-- Grace period doesn't help: $0.02 ≠ 0.0, bypasses exact-zero check
+- MEMELORD: 6+ copycat tokens, all scored 35-63, got buy/strong_buy despite `copycat_rugged_symbol` AND `rugcheck_danger` (score 11500) firing
+- CRIME: 85 launches in 6 hours, 12 positions taken — industrial copycat spam
+- NIKOLAICH, NoLimit: same pattern — LP removed within seconds of position open
+- Root cause: bull rules (+12 total from explosive_buy_velocity, holder_acceleration, organic_buy_pattern etc.) overwhelm bear rules (copycat -8 + rugcheck_danger -2 = -10)
+- 52% of liquidity_removed positions close within 30 seconds
 
-## Root Cause
+**Key insight**: the fix belongs in the **signal layer** — prevent positions from opening on scam tokens. Don't change close/price logic.
 
-In `_paper_price_loop` (worker.py:3698):
+## Strategy: Three combinatorial guards
+
+All guards are **combinatorial** (require 2+ conditions), not single-factor. This prevents false positives on legitimate tokens.
+
+### Guard 1: Add `copycat_rugged` to compound scam fingerprint (R61)
+
+**File**: `src/parsers/signals.py` line 175 (after sybil flag)
+
+Currently 6 flags: LP_unsecured, mintable, bundled_buy, rugcheck_2+_dangers, serial_3+_dead, sybil_0.3+. Add 7th:
+
 ```python
-if bp and bp.liquidity is not None:
-    live_liq_map[pos.token_id] = float(bp.liquidity)  # BAD: bonding curve liq
+if copycat_rugged:
+    _scam_flags += 1
+    _scam_details.append(f"copycat_{copycat_rug_count}x_rugged")
 ```
 
-Birdeye `multi_price` aggregates ALL pools for a token. If the bonding curve pool still exists (it does for most pump.fun tokens), `liquidity` can reflect only that pool's near-zero value instead of the active Raydium pool's real liquidity.
+**Threshold stays at 3.** So copycat alone = 1 flag (harmless). But:
+- MEMELORD: copycat(1) + LP_unsecured(1) + rugcheck_2+_dangers(1) = 3 → **hard avoid**
+- CRIME: copycat(1) + serial_deployer(1) + LP_unsecured(1) = 3 → **hard avoid**
+- CLEUS +140%: copycat(1) + LP_burned + no_serial = 1 flag → **not affected** ✅
 
-## Fix Strategy: Two-layer defense
+### Guard 2: New R66 — copycat + serial deployer compound (-4)
 
-### Layer 1: DexScreener liquidity ALWAYS takes priority (worker.py)
+**File**: `src/parsers/signals.py` line 901 (after R63)
 
-Currently DexScreener liquidity is only used when Birdeye doesn't return it (`if _tid not in live_liq_map`). Fix: **always fetch DexScreener liquidity for ALL open positions** (up to 20), and let it OVERRIDE Birdeye's unreliable multi_price liquidity.
+When BOTH copycat AND serial deployer fire, apply extra -4:
 
-DexScreener `get_token_pairs()` returns per-pair data — we already pick `max_liq` across all pairs. This is the most reliable liquidity source because it shows actual DEX pool liquidity, not bonding curve artifacts.
+```python
+# R66: Copycat + serial deployer compound — Phase 38
+if copycat_rugged and pumpfun_dead_tokens is not None and pumpfun_dead_tokens >= 2:
+    r = SignalRule(
+        "copycat_serial_compound", -4,
+        f"Copycat symbol + creator has {pumpfun_dead_tokens} dead tokens",
+    )
+    fired.append(r)
+    reasons[r.name] = r.description
+```
 
-**Change in `_paper_price_loop`** (worker.py ~3722-3765):
-- Fetch DexScreener for ALL positions (not just missing price/liq)
-- DexScreener liq OVERRIDES Birdeye liq (not just fills gaps)
-- Same for `_real_price_loop`
+With this: copycat(-6) + serial(-3) + compound(-4) = -13 vs bull +12 = net -1 = **avoid**.
+CLEUS: `pumpfun_dead_tokens=None` → R66 doesn't fire ✅
 
-### Layer 2: Price-coherence guard in close_conditions.py
+### Guard 3: Fresh unsecured LP cap (< 2 min + LP unlocked → max watch)
 
-If Birdeye/DexScreener both fail, add a safety net: if price is stable/rising but liquidity suddenly drops to near-zero — it's data noise, not a real rug.
+**File**: `src/parsers/signals.py` line 1006 (after graduation_zone cap)
 
-**In `close_conditions.py`**, before returning `liquidity_removed`:
-- If `current_price >= entry_price * 0.7` (price hasn't crashed 30%+), the token is likely alive
-- A real LP removal crashes price to near-zero instantly
-- Skip `liquidity_removed` when price is coherent → let other conditions (stop loss, timeout) handle naturally
+```python
+# Phase 38: Fresh unsecured LP cap
+_is_fresh_unsecured_lp = (
+    token_age_minutes is not None and token_age_minutes < 2
+    and raydium_lp_burned is not None and not raydium_lp_burned
+    and security is not None and not security.lp_burned and not security.lp_locked
+)
+if _is_fresh_unsecured_lp and net > 2:
+    net = 2
+```
+
+Token gets another chance at MIN_5 (5 min). Legit tokens survive; scams are rugged by then.
+- CLEUS: LP burned → not affected ✅
+- punchDance: LP burned → not affected ✅
+- All test profitable tokens: either LP burned or age ≥ 2 min ✅
 
 ## Files
 
 | File | Changes |
 |------|---------|
-| `src/trading/close_conditions.py` | Add price-coherence guard before `liquidity_removed` |
-| `src/parsers/worker.py` | DexScreener liq overrides Birdeye in both price loops |
+| `src/parsers/signals.py` | Guard 1 (line 175), Guard 2 (line 901), Guard 3 (line 1006) |
+| `tests/test_parsers/test_signals_antiscam.py` | 10 new tests: scam blocking + profitable token safety |
 
-## Detailed Changes
+## Expected Impact
 
-### 1. `src/trading/close_conditions.py` — Price-coherence guard
-
-Replace the current liquidity block (lines 41-52):
-
-```python
-# Liquidity critically low — pool drained, can't sell without massive slippage
-if liquidity_usd is not None and liquidity_usd < 5_000:
-    # Phase 37: Price-coherence check.
-    # Birdeye multi_price often returns bonding-curve liq (near-zero)
-    # instead of real DEX pool liq. A real LP removal crashes price instantly.
-    # If price is still >= 70% of entry, token is alive — data is wrong.
-    price_ok = (
-        pos.entry_price
-        and pos.entry_price > 0
-        and current_price >= pos.entry_price * Decimal("0.5")
-    )
-    if price_ok and liquidity_usd < 100:
-        # Near-zero liq but price healthy → bad data, skip
-        pass
-    elif liquidity_usd == 0.0 and pos.opened_at:
-        # Exact zero on fresh position → indexing lag grace period
-        age_sec = (now - pos.opened_at).total_seconds()
-        if age_sec <= liquidity_grace_period_sec:
-            pass
-        else:
-            # Exact zero on mature position — still check price coherence
-            if price_ok:
-                pass  # Price alive, liq data stale
-            else:
-                return "liquidity_removed"
-    else:
-        # Non-zero low liq ($100-$5K) with price crash → genuine LP drain
-        if price_ok:
-            pass  # Price still healthy, liq data likely wrong
-        else:
-            return "liquidity_removed"
-```
-
-Logic summary:
-- `liq < $100 AND price >= 50% of entry` → skip (bad data)
-- `liq == 0 AND fresh position` → skip (indexing lag)
-- `liq == 0 AND mature AND price >= 50% of entry` → skip (stale data)
-- `liq < $5K AND price < 50% of entry` → `liquidity_removed` (real rug/drain)
-
-The 50% threshold is conservative: real LP removals crash price 90%+. A 50% drop WITH low liquidity is a genuine emergency.
-
-### 2. `src/parsers/worker.py` — DexScreener liq priority
-
-In `_paper_price_loop` (~line 3722): Change DexScreener fetch scope from "missing only" to "all positions", and let DexScreener OVERRIDE Birdeye liq:
-
-```python
-# DexScreener: fetch for ALL open positions (not just missing)
-# DexScreener gives per-DEX-pair liquidity — more reliable than Birdeye multi_price
-# which can return bonding curve liq (near-zero) for migrated tokens
-_dex_fetch_addrs = list(dict.fromkeys(
-    [p.token_address for p in positions if p.token_id not in token_prices]
-    + list(addresses)  # ALL addresses for liquidity
-))[:20]
-```
-
-And change `if _tid and _tid not in live_liq_map:` to unconditionally store:
-```python
-# DexScreener liq overrides Birdeye (more reliable for DEX pool data)
-if _tid:
-    live_liq_map[_tid] = max_liq
-```
-
-Same changes in `_real_price_loop`.
-
-### 3. Copycat tracking guard (worker.py ~3817)
-
-Update the rugged symbol tracking to also respect price-coherence:
-```python
-if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
-    # Only track as rug if price also crashed (not just bad liq data)
-    _pos_price = token_prices.get(pos.token_id)
-    _price_crashed = (
-        _pos_price is not None
-        and pos.entry_price
-        and pos.entry_price > 0
-        and float(_pos_price / pos.entry_price) < 0.5
-    )
-    if not _price_crashed:
-        continue  # Price healthy, liq data unreliable — don't mark as rug
-    ...existing logic...
-```
-
-## Tests
-
-Update `tests/test_trading/test_close_conditions.py`:
-- Existing tests: adjust expectations for price-coherent positions
-- New tests:
-  - `test_skip_liq_removed_when_price_healthy` — liq=$0.02, price=entry → None
-  - `test_close_liq_removed_when_price_crashed` — liq=$0.02, price=10% of entry → "liquidity_removed"
-  - `test_skip_near_zero_liq_price_above_50pct` — liq=$50, price=60% of entry → None
-  - `test_close_low_liq_price_below_50pct` — liq=$2K, price=30% of entry → "liquidity_removed"
+- MEMELORD pattern → **hard avoid** (compound scam fingerprint)
+- CRIME pattern → **hard avoid** (compound scam fingerprint)
+- Fresh copycats with unlocked LP → max **watch** (no position opened)
+- CLEUS +140%, punchDance +127% etc. → **unchanged** ✅
 
 ## Verification
 
 ```bash
 # Tests
-.venv/bin/python -m pytest tests/test_trading/test_close_conditions.py -v
+.venv/bin/python -m pytest tests/test_parsers/test_signals_antiscam.py -v
+
+# Also verify existing profitable tests pass
+.venv/bin/python -m pytest tests/test_parsers/test_signals_antiscam.py -k "profitable" -v
 
 # Deploy and monitor
-# After deploy: check PM2 logs for liquidity_removed rate
-# Before: 57% of closes are liquidity_removed
-# After: should drop to <10% (only genuine rugs where price also crashed)
-ssh root@178.156.247.90 "pm2 logs mec-radar --lines 100 --nostream | grep liquidity_removed | wc -l"
+# Check liquidity_removed rate drops
+ssh root@178.156.247.90 "psql -U mec_radar -d mec_radar -c \"SELECT close_reason, COUNT(*) FROM positions WHERE closed_at > NOW() - INTERVAL '1 hour' GROUP BY close_reason ORDER BY COUNT(*) DESC;\""
 ```

@@ -984,3 +984,202 @@ class TestPhase35BacktestProfitable:
             f"CLEUS×126 NOT blocked! action={result.action}, "
             f"net={result.net_score}, rules={result.reasons}"
         )
+
+
+# --- Phase 38: Compound Copycat Guard + Fresh Unsecured LP Cap ---
+
+
+class TestPhase38CompoundCopycatGuard:
+    """Phase 38: copycat in compound fingerprint + R66 + fresh unsecured LP cap."""
+
+    # -- Guard 1: Copycat in compound scam fingerprint --
+
+    def test_copycat_lp_unsecured_rugcheck_compound_avoid(self):
+        """MEMELORD pattern: copycat + LP_unsecured + rugcheck 2+ dangers → avoid."""
+        snapshot = _make_snapshot(
+            holders_count=50,
+            score=50,
+            buys_5m=80,
+            sells_5m=15,
+            buys_1h=80,
+            sells_1h=15,
+        )
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=6,
+            raydium_lp_burned=False,
+            rugcheck_danger_count=2,
+            token_age_minutes=1.0,
+        )
+        assert result.action == "avoid"
+        assert "compound_scam_fingerprint" in result.reasons
+
+    def test_copycat_serial_lp_unsecured_compound_avoid(self):
+        """CRIME pattern: copycat + serial_deployer + LP_unsecured → avoid."""
+        snapshot = _make_snapshot(
+            holders_count=50,
+            score=50,
+            buys_5m=80,
+            buys_1h=80,
+            sells_1h=15,
+        )
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=3,
+            raydium_lp_burned=False,
+            pumpfun_dead_tokens=5,
+            token_age_minutes=1.0,
+        )
+        assert result.action == "avoid"
+        assert "compound_scam_fingerprint" in result.reasons
+
+    def test_copycat_alone_not_compound(self):
+        """Copycat alone (1 flag) does NOT trigger compound scam."""
+        snapshot = _make_snapshot()
+        sec = _make_security()  # LP burned = clean
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=3,
+        )
+        assert "compound_scam_fingerprint" not in result.reasons
+
+    def test_copycat_plus_one_flag_not_compound(self):
+        """Copycat + 1 other flag = 2 total < 3 threshold → not compound."""
+        snapshot = _make_snapshot()
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=1,
+            raydium_lp_burned=False,
+        )
+        # 2 flags: copycat + LP_unsecured < 3
+        assert "compound_scam_fingerprint" not in result.reasons
+
+    # -- Guard 2: R66 Copycat + serial deployer compound --
+
+    def test_copycat_serial_compound_fires(self):
+        """Copycat + serial deployer 2+ dead → R66 -4."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=3,
+            pumpfun_dead_tokens=3,
+        )
+        assert "copycat_serial_compound" in result.reasons
+        rule = [r for r in result.rules_fired if r.name == "copycat_serial_compound"]
+        assert len(rule) == 1
+        assert rule[0].weight == -4
+
+    def test_copycat_serial_compound_threshold_2(self):
+        """Copycat + 2 dead tokens (threshold) → R66 fires."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=1,
+            pumpfun_dead_tokens=2,
+        )
+        assert "copycat_serial_compound" in result.reasons
+
+    def test_copycat_no_serial_no_compound(self):
+        """Copycat alone (no serial deployer) → R66 doesn't fire."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=True,
+            copycat_rug_count=3,
+            pumpfun_dead_tokens=0,
+        )
+        assert "copycat_serial_compound" not in result.reasons
+
+    def test_serial_no_copycat_no_compound(self):
+        """Serial deployer alone (no copycat) → R66 doesn't fire."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            copycat_rugged=False,
+            pumpfun_dead_tokens=5,
+        )
+        assert "copycat_serial_compound" not in result.reasons
+
+    # -- Guard 3: Fresh unsecured LP cap REMOVED after backtest --
+    # PumpFun tokens ALWAYS have lp_burned=NULL, lp_locked=false.
+    # Backtest showed 56.7% of profitable positions would be blocked.
+    # Guards 1+2 are sufficient.
+
+    # -- Safety: Profitable tokens NOT affected --
+
+    def test_cleus_140pct_not_blocked_by_phase38(self):
+        """CLEUS +140%: copycat=1, LP burned → NOT blocked by any Phase 38 guard."""
+        snapshot = _make_snapshot(
+            holders_count=300,
+            score=75,
+            smart_wallets_count=4,
+            buys_5m=100,
+            buys_1h=400,
+            sells_1h=40,
+        )
+        sec = _make_security()  # LP burned by default
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=1,
+            token_age_minutes=2.0,
+            raydium_lp_burned=True,
+        )
+        assert result.action != "avoid", (
+            f"CLEUS +140% blocked by Phase 38! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )
+        assert "compound_scam_fingerprint" not in result.reasons
+        assert "copycat_serial_compound" not in result.reasons
+
+    def test_punchdance_127pct_not_blocked(self):
+        """punchDance +127%: LP burned, no copycat → unaffected."""
+        snapshot = _make_snapshot(
+            liquidity_usd=8281,
+            holders_count=200,
+            score=70,
+            smart_wallets_count=3,
+            buys_5m=60,
+            buys_1h=250,
+            sells_1h=25,
+        )
+        sec = _make_security()
+        result = evaluate_signals(snapshot, sec, token_age_minutes=2.0)
+        assert result.action != "avoid", (
+            f"punchDance +127% blocked! action={result.action}, "
+            f"net={result.net_score}"
+        )
+
+    def test_memelord_scam_blocked_by_phase38(self):
+        """MEMELORD scam: copycat×6 + LP unsecured + rugcheck + serial → avoid."""
+        snapshot = _make_snapshot(
+            holders_count=50,
+            score=50,
+            buys_5m=80,
+            sells_5m=15,
+            buys_1h=80,
+            sells_1h=15,
+        )
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            copycat_rugged=True,
+            copycat_rug_count=6,
+            raydium_lp_burned=False,
+            rugcheck_danger_count=3,
+            pumpfun_dead_tokens=5,
+            token_age_minutes=1.0,
+        )
+        assert result.action == "avoid", (
+            f"MEMELORD scam NOT blocked! action={result.action}, "
+            f"net={result.net_score}, rules={result.reasons}"
+        )

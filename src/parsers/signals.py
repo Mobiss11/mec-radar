@@ -174,6 +174,13 @@ def evaluate_signals(
         _scam_flags += 1
         _scam_details.append(f"sybil_{fee_payer_sybil_score:.0%}")
 
+    # Phase 38: Copycat rugged symbol — adds combinatorial power.
+    # Alone = 1 flag (harmless). But copycat + LP_unsecured + rugcheck = 3 → avoid.
+    # MEMELORD: 6+ copycats all scored buy despite -8 penalty. With compound: hard avoid.
+    if copycat_rugged:
+        _scam_flags += 1
+        _scam_details.append(f"copycat_{copycat_rug_count}x_rugged")
+
     if _scam_flags >= 3:
         gate_rule = SignalRule(
             "compound_scam_fingerprint", -10,
@@ -900,6 +907,24 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
+    # R66: Copycat + serial deployer compound — Phase 38.
+    # When BOTH copycat AND creator has dead tokens, individual penalties
+    # (-6/-8 copycat + -3 serial = -11) are overcome by bot-farmed bull rules (+12 to +15).
+    # Extra -4 makes total -15 to -17, ensuring scam net stays negative.
+    # CLEUS +140%: pumpfun_dead_tokens=None → not affected.
+    if (
+        copycat_rugged
+        and pumpfun_dead_tokens is not None
+        and pumpfun_dead_tokens >= 2
+    ):
+        r = SignalRule(
+            "copycat_serial_compound", -4,
+            f"Copycat symbol + creator has {pumpfun_dead_tokens} dead tokens "
+            f"(high-confidence scam pattern)",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
     # --- PHASE 31/31b ANTI-RUG RULES ---
     # Production data (2026-02-23 10:21-11:18 UTC): graduation drain pattern.
     # PumpFun tokens graduate to Raydium with ~85/$98 SOL ($174K/$201K/$221K liq),
@@ -1004,6 +1029,12 @@ def evaluate_signals(
     # where bearish rules don't accumulate enough weight.
     if _is_graduation_zone and net > 2:
         net = 2
+
+    # Phase 38: Fresh unsecured LP cap REMOVED after backtest.
+    # PumpFun tokens ALWAYS have lp_burned=NULL, lp_locked=false (bonding curve).
+    # Backtest showed 56.7% (148/261) of profitable positions would be blocked.
+    # LP unsecured is NOT discriminative for PumpFun tokens — all have it.
+    # Guards 1+2 (compound fingerprint + R66) are sufficient.
 
     if net >= 8:
         action = "strong_buy"
