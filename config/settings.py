@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     paper_take_profit_x: float = 1.5  # Phase 35: was 2.0, reduced to capture gains before instant rugs
     paper_stop_loss_pct: float = -50.0
     paper_timeout_hours: int = 8
+    liquidity_grace_period_sec: int = 90  # Phase 36: grace period for zero-liq fresh positions (DexScreener lag)
 
     # Real trading (DISABLED by default — requires wallet_private_key)
     real_trading_enabled: bool = False

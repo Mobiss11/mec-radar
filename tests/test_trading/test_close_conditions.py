@@ -13,20 +13,27 @@ import pytest
 from src.trading.close_conditions import check_close_conditions
 
 
+_SENTINEL = object()
+
+
 def _make_position(
     *,
     entry_price: Decimal = Decimal("0.001"),
     current_price: Decimal | None = None,
     max_price: Decimal | None = None,
-    opened_at: datetime | None = None,
+    opened_at: datetime | None | object = _SENTINEL,
     status: str = "open",
 ) -> SimpleNamespace:
-    """Build a lightweight Position-like object for testing."""
+    """Build a lightweight Position-like object for testing.
+
+    Pass opened_at=None explicitly to get a position with opened_at=None.
+    Omit opened_at to get datetime.now(UTC) as default.
+    """
     return SimpleNamespace(
         entry_price=entry_price,
         current_price=current_price or entry_price,
         max_price=max_price,
-        opened_at=opened_at or datetime.now(UTC),
+        opened_at=datetime.now(UTC) if opened_at is _SENTINEL else opened_at,
         status=status,
     )
 
@@ -481,4 +488,114 @@ def test_close_liquidity_removed_takes_priority():
         pos, Decimal("3.00"), is_rug=False, now=datetime.now(UTC),
         liquidity_usd=0.0,
     )
+    assert result == "liquidity_removed"
+
+
+# ── Phase 36: Grace period for zero-liq fresh positions ─────────────
+
+
+def test_close_liq_zero_fresh_grace_period():
+    """Fresh position (<90s) with zero liquidity → NOT closed (DexScreener lag)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.20"),
+        opened_at=now - timedelta(seconds=30),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.20"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    assert result is None
+
+
+def test_close_liq_zero_after_grace_period():
+    """Position past 90s grace period with zero liq → liquidity_removed."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(seconds=91),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_close_liq_low_nonzero_ignores_grace():
+    """Non-zero low liq ($3K) → close immediately regardless of position age."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.50"),
+        opened_at=now - timedelta(seconds=10),  # Very fresh
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.50"), is_rug=False, now=now,
+        liquidity_usd=3000.0,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_close_liq_zero_at_exactly_90s():
+    """Position exactly at 90s with zero liq → still within grace (< 90, strict)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(seconds=90),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    assert result is None
+
+
+def test_close_liq_none_no_close():
+    """None liquidity (no data at all) → never triggers close."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.50"),
+        opened_at=now - timedelta(seconds=5),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.50"), is_rug=False, now=now,
+        liquidity_usd=None,
+    )
+    assert result is None
+
+
+def test_close_custom_grace_period_45s():
+    """Custom grace period 45s: position at 50s → closed (past grace)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(seconds=50),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+        liquidity_grace_period_sec=45,
+    )
+    assert result == "liquidity_removed"
+
+
+def test_close_liq_zero_no_opened_at_still_closes():
+    """Zero liq + no opened_at → falls through to non-zero branch → close."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=None,
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        liquidity_usd=0.0,
+    )
+    # liquidity_usd == 0.0 but opened_at is None → falls to else branch
     assert result == "liquidity_removed"

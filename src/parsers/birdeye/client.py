@@ -114,12 +114,18 @@ class BirdeyeClient:
         data = await self._request("GET", "/defi/price", params={"address": address})
         return BirdeyePrice.model_validate(data)
 
-    async def get_price_multi(self, addresses: list[str]) -> dict[str, BirdeyePrice]:
-        """Fetch prices for multiple tokens at once. Available on Lite. ~10 CU."""
+    async def get_price_multi(
+        self, addresses: list[str], *, include_liquidity: bool = False,
+    ) -> dict[str, BirdeyePrice]:
+        """Fetch prices for multiple tokens at once. Available on Lite. ~10 CU.
+
+        With include_liquidity=True, response includes liquidity field per token.
+        """
         addr_str = ",".join(addresses[:100])
-        data = await self._request(
-            "GET", "/defi/multi_price", params={"list_address": addr_str}
-        )
+        params: dict[str, str] = {"list_address": addr_str}
+        if include_liquidity:
+            params["include_liquidity"] = "true"
+        data = await self._request("GET", "/defi/multi_price", params=params)
         result: dict[str, BirdeyePrice] = {}
         if isinstance(data, dict):
             for addr, price_data in data.items():

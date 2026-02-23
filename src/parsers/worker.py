@@ -3665,7 +3665,7 @@ async def _paper_price_loop(
             # Collect unique token addresses
             addresses = list({p.token_address for p in positions})
 
-            # Primary: Birdeye multi-price (note: multi_price does NOT return liquidity)
+            # Primary: Birdeye multi-price WITH liquidity (Phase 36)
             token_prices: dict[int, Decimal] = {}
             live_liq_map: dict[int, float | None] = {}  # Live liquidity from API
             _stale_tokens: set[int] = set()  # token_ids with stale Birdeye price
@@ -3675,7 +3675,9 @@ async def _paper_price_loop(
                     _now_unix = int(_time.time())
                     _stale_threshold = 300  # 5 min — pump.fun prices freeze after migration
                     _dead_threshold = 600  # 10 min — likely dead token, force close
-                    be_prices = await birdeye.get_price_multi(addresses[:100])
+                    be_prices = await birdeye.get_price_multi(
+                        addresses[:100], include_liquidity=True,
+                    )
                     for pos in positions:
                         bp = be_prices.get(pos.token_address)
                         if bp and bp.value:
@@ -3692,8 +3694,9 @@ async def _paper_price_loop(
                                     logger.warning(f"[PAPER] Birdeye stale price for {pos.token_address[:12]}... (age={_age}s, skipping)")
                                 continue
                             token_prices[pos.token_id] = bp.value
-                        # Birdeye multi_price doesn't return liquidity (always None)
-                        # Liquidity is fetched via DexScreener fallback below
+                        # Phase 36: Extract liquidity from Birdeye (primary source)
+                        if bp and bp.liquidity is not None:
+                            live_liq_map[pos.token_id] = float(bp.liquidity)
                 except Exception as e:
                     logger.warning(f"[PAPER] Birdeye multi-price failed: {e}")
 
@@ -3711,7 +3714,7 @@ async def _paper_price_loop(
                     logger.warning(f"[PAPER] Jupiter batch fallback failed: {e}")
 
             # Fallback 2: DexScreener for pump.fun tokens still missing price
-            # Also collects liquidity for ALL positions (Birdeye multi_price doesn't return it)
+            # Phase 36: Also collects liquidity for positions where Birdeye didn't return it
             # Uses get_token_pairs (per-token) instead of get_tokens_batch because
             # batch endpoint returns only one pair per token (often the dead bonding
             # curve pool with near-zero price). Per-token gives all pairs so we can
@@ -3736,7 +3739,7 @@ async def _paper_price_loop(
                         _tid = _addr_to_tid.get(addr)
                         if not pairs:
                             if _tid and _tid not in live_liq_map:
-                                live_liq_map[_tid] = 0.0  # No pairs = dead token
+                                live_liq_map[_tid] = None  # Phase 36: No pairs = unknown (indexing lag)
                             continue
                         # Pick the pair with highest liquidity (or highest price as tiebreaker)
                         best_price = _Dec(0)
@@ -3785,7 +3788,7 @@ async def _paper_price_loop(
                                 _liq = float(snap.liquidity_usd or snap.dex_liquidity_usd or 0)
                                 live_liq_map[pos.token_id] = _liq
                             else:
-                                live_liq_map[pos.token_id] = 0.0  # No snapshot = unknown
+                                live_liq_map[pos.token_id] = None  # Phase 36: No snapshot = unknown
                 except Exception as e:
                     logger.debug(f"[PAPER] DB liq fallback failed: {e}")
 
@@ -3805,18 +3808,25 @@ async def _paper_price_loop(
                         )
                     await session.commit()
 
+                # Phase 36: Compute _now_dt once for copycat tracking + adaptive interval
+                from datetime import datetime, UTC
+                _now_dt = datetime.now(UTC).replace(tzinfo=None)
+
                 # Phase 33/34: Track rugged symbols for copycat detection (R63).
                 # If liquidity < $5K for a position, it was closed as liquidity_removed.
                 for pos in positions:
                     _pos_liq = live_liq_map.get(pos.token_id)
                     if _pos_liq is not None and _pos_liq < 5_000 and pos.symbol:
+                        # Phase 36: Skip false-positive rug tracking for fresh positions
+                        # with zero liq (DexScreener/Birdeye indexing lag)
+                        if _pos_liq == 0.0 and pos.opened_at:
+                            if (_now_dt - pos.opened_at).total_seconds() < 90:
+                                continue
                         await _track_rugged_symbol(pos.symbol)
 
             # Phase 35: Adaptive interval — 5s for fresh positions (< 120s old),
             # 15s for mature. Fresh positions have highest rug risk; faster checks
             # catch instant rugs and capture profit before LP removal.
-            from datetime import datetime, UTC
-            _now_dt = datetime.now(UTC).replace(tzinfo=None)
             _has_fresh = any(
                 pos.opened_at and (_now_dt - pos.opened_at).total_seconds() < 120
                 for pos in positions
@@ -3907,7 +3917,7 @@ async def _real_price_loop(
 
             addresses = list({p.token_address for p in positions})
 
-            # Primary: Birdeye multi-price (note: multi_price does NOT return liquidity)
+            # Primary: Birdeye multi-price WITH liquidity (Phase 36)
             token_prices: dict[int, Decimal] = {}
             live_liq_map: dict[int, float | None] = {}
             if birdeye:
@@ -3916,7 +3926,9 @@ async def _real_price_loop(
                     _now_unix_r = int(_time_r.time())
                     _stale_thr = 300  # 5 min
                     _dead_thr = 600  # 10 min — force close
-                    be_prices = await birdeye.get_price_multi(addresses[:100])
+                    be_prices = await birdeye.get_price_multi(
+                        addresses[:100], include_liquidity=True,
+                    )
                     for pos in positions:
                         bp = be_prices.get(pos.token_address)
                         if bp and bp.value:
@@ -3928,6 +3940,9 @@ async def _real_price_loop(
                                     token_prices[pos.token_id] = bp.value
                                 continue
                             token_prices[pos.token_id] = bp.value
+                        # Phase 36: Extract liquidity from Birdeye
+                        if bp and bp.liquidity is not None:
+                            live_liq_map[pos.token_id] = float(bp.liquidity)
                 except Exception as e:
                     logger.debug(f"[REAL] Birdeye multi-price failed: {e}")
 
@@ -3944,7 +3959,7 @@ async def _real_price_loop(
                 except Exception as e:
                     logger.debug(f"[REAL] Jupiter batch fallback failed: {e}")
 
-            # DB snapshot fallback for liquidity (Birdeye multi_price never returns it)
+            # Phase 36: DB snapshot fallback for liquidity (when Birdeye didn't return it)
             _real_missing_liq = [
                 p for p in positions
                 if p.token_id not in live_liq_map and p.token_id in token_prices
@@ -3958,7 +3973,7 @@ async def _real_price_loop(
                                 _liq_r = float(snap.liquidity_usd or snap.dex_liquidity_usd or 0)
                                 live_liq_map[pos.token_id] = _liq_r
                             else:
-                                live_liq_map[pos.token_id] = 0.0
+                                live_liq_map[pos.token_id] = None  # Phase 36: unknown, not confirmed dead
                 except Exception as e:
                     logger.debug(f"[REAL] DB liq fallback failed: {e}")
 

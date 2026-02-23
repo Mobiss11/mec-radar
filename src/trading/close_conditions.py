@@ -24,6 +24,7 @@ def check_close_conditions(
     stop_loss_pct: float = -50.0,
     timeout_hours: int = 8,
     liquidity_usd: float | None = None,
+    liquidity_grace_period_sec: int = 90,
 ) -> str | None:
     """Check if position should be closed. Returns reason string or None.
 
@@ -38,7 +39,17 @@ def check_close_conditions(
     """
     # Liquidity critically low — pool drained, can't sell without massive slippage
     if liquidity_usd is not None and liquidity_usd < 5_000:
-        return "liquidity_removed"
+        # Phase 36: Grace period for zero-liq on fresh positions.
+        # Zero liquidity on fresh tokens is usually DexScreener/Birdeye indexing lag,
+        # not an actual rug. Non-zero low liq (e.g. $2K) is a genuine LP drain.
+        if liquidity_usd == 0.0 and pos.opened_at:
+            age_sec = (now - pos.opened_at).total_seconds()
+            if age_sec <= liquidity_grace_period_sec:
+                pass  # Skip — data source likely hasn't indexed yet
+            else:
+                return "liquidity_removed"
+        else:
+            return "liquidity_removed"
 
     if is_rug:
         return "rug"

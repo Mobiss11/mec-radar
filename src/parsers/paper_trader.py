@@ -250,29 +250,50 @@ class PaperTrader:
         pos.closed_at = datetime.now(UTC).replace(tzinfo=None)
         pos.current_price = price
 
-        # Liquidity removed / critically low — can't sell without massive slippage
+        # Liquidity removed / critically low — estimate realistic exit with slippage
         if reason == "liquidity_removed":
             _sol_usd = Decimal(str(sol_price_usd))
             _liq = liquidity_usd or 0
-            # liq=0 → total loss; liq < 5K → ~95% loss (massive slippage)
-            loss_pct = Decimal("-100") if _liq < 100 else Decimal("-95")
-            pos.pnl_pct = loss_pct
-            pos.pnl_usd = (pos.amount_sol_invested or Decimal("0")) * loss_pct / 100 * _sol_usd
+
+            if price <= 0 or _liq == 0:
+                # Truly dead: zero price or zero liquidity → total loss
+                _exit_pnl = Decimal("-100")
+                _exit_price = Decimal("0")
+                _exit_sol = Decimal("0")
+            elif _liq < 100:
+                # Near-zero ($0-$100) → essentially unsellable
+                _exit_pnl = Decimal("-95")
+                _exit_price = Decimal("0")
+                _exit_sol = Decimal("0")
+            else:
+                # Low liq ($100-$5K) → sellable with heavy slippage
+                # Phase 36: Quadratic slippage model based on position/liquidity ratio
+                raw_exit_sol = (pos.amount_token or Decimal("0")) * price
+                raw_exit_usd = float(raw_exit_sol) * sol_price_usd
+                impact = raw_exit_usd / max(_liq, 1.0)
+                slippage = min(impact * impact * 50, 90)  # 1x impact=50%, 2x=90%
+                _exit_sol = raw_exit_sol * Decimal(str(max(1.0 - slippage / 100, 0.10)))
+                _exit_price = price
+                invest = pos.amount_sol_invested or Decimal("1")
+                _exit_pnl = (_exit_sol - invest) / invest * 100
+
+            pos.pnl_pct = _exit_pnl
+            pos.pnl_usd = (pos.amount_sol_invested or Decimal("0")) * _exit_pnl / 100 * _sol_usd
             trade = Trade(
                 signal_id=pos.signal_id,
                 token_id=pos.token_id,
                 token_address=pos.token_address,
                 side="sell",
-                amount_sol=Decimal("0"),
+                amount_sol=_exit_sol,
                 amount_token=pos.amount_token,
-                price=Decimal("0"),
+                price=_exit_price,
                 is_paper=1,
                 status="filled",
             )
             session.add(trade)
             logger.warning(
                 f"[PAPER] Closed {pos.token_address[:12]} reason=liquidity_removed "
-                f"P&L={loss_pct}% liq=${_liq:,.0f} (pool drained, unsellable)"
+                f"P&L={_exit_pnl:+.1f}% liq=${_liq:,.0f}"
             )
             return
 
