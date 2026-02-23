@@ -16,7 +16,7 @@ class EnrichmentStage(IntEnum):
 
     PRE_SCAN = -1  # +5s — instant reject obvious scams (Phase 12)
     INITIAL = 0  # +45s — full baseline
-    MIN_2 = 1  # +2m — quick DexScreener price check
+    MIN_2 = 1  # +45s — quick DexScreener price check (was 2m, reduced for fast entry)
     MIN_5 = 2  # +5m — holder shift, prune low-score
     MIN_10 = 3  # +10m — price trajectory
     MIN_15 = 4  # +15m — deep gmgn check, prune
@@ -67,7 +67,7 @@ STAGE_SCHEDULE: dict[EnrichmentStage, StageConfig] = {
         fetch_metadata=True,
     ),
     EnrichmentStage.MIN_2: StageConfig(
-        offset_sec=2 * 60,
+        offset_sec=45,  # Reduced from 120s to 45s — median lost potential was 108s
         fetch_gmgn_info=True,  # quick price check for early pump/dump detection
         fetch_dexscreener=True,
     ),

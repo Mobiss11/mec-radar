@@ -683,6 +683,49 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
+    # --- PHASE 30 FAST ENTRY RULES ---
+    # These rules are designed to fire on INITIAL (T+12s) when prev_snapshot
+    # is not available. They detect early organic momentum using absolute
+    # metrics that don't require historical comparison.
+
+    # R55: Early organic momentum — healthy MCap/Liq ratio + decent holders
+    # + more buys than sells on a very young token. This compensates for
+    # R9 price_momentum which NEVER fires on INITIAL (no prev_snapshot).
+    # MCap/Liq < 5 = healthy ratio, holders >= 15 at T+12s = organic growth.
+    if (
+        prev_snapshot is None  # Only fires when no previous snapshot (INITIAL)
+        and token_age_minutes is not None
+        and token_age_minutes <= 3  # Very fresh token
+        and liq > 0 and mcap > 0
+        and mcap / liq < 5  # Healthy ratio (not pumped beyond liquidity)
+        and holders >= 15  # Decent holder count for <3 min old token
+        and buys > sells  # Net buying pressure
+    ):
+        r = SignalRule(
+            "early_organic_momentum", 3,
+            f"Early momentum: {holders} holders in {token_age_minutes:.1f}m, "
+            f"MCap/Liq={mcap/liq:.1f}x, {buys}B/{sells}S",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
+    # R56: Fresh volume surge — high 5m volume relative to liquidity on
+    # a very young token. At T+12s vol_5m is essentially "volume since launch".
+    # Vol/Liq >= 0.5 means significant trading activity for a brand-new token.
+    if (
+        token_age_minutes is not None
+        and token_age_minutes <= 3
+        and liq > 0 and vol_5m_check > 0
+        and vol_5m_check / liq >= 0.5
+    ):
+        r = SignalRule(
+            "fresh_volume_surge", 2,
+            f"Fresh volume surge: 5m vol/liq = {vol_5m_check/liq:.1f}x "
+            f"at {token_age_minutes:.1f}m age",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))
