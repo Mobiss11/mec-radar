@@ -100,13 +100,14 @@ def evaluate_signals(
     # All 3 real rugs (Mr., HAPEPE, Conor) + YABOOZARU dump caught.
     # Zero false positives on successful trades > $30K liq.
 
-    # HG1: Minimum liquidity — tokens with < $21K liq have high rug rate
-    # in our data. ALL 3 real rugs had liq $19-23K. Lowered from $30K to $21K
-    # to capture tokens in $21-30K range that may still pump.
-    if 0 < liq < 21_000:
+    # HG1: Minimum liquidity — hard gate only for very low liq (< $5K).
+    # Many PumpFun tokens launch with $5-15K liq and pump to $50K+ mcap.
+    # Old gate at $21K killed Gapple (liq=$14K, pumped to $52K mcap = +223% missed).
+    # Soft penalty for $5K-$20K range instead of hard block.
+    if 0 < liq < 5_000:
         gate_rule = SignalRule(
             "low_liquidity_gate", -10,
-            f"Hard gate: liquidity ${liq:,.0f} < $21K (high rug risk)",
+            f"Hard gate: liquidity ${liq:,.0f} < $5K (extremely thin)",
         )
         return SignalResult(
             rules_fired=[gate_rule],
@@ -211,6 +212,17 @@ def evaluate_signals(
                 reasons[r.name] = r.description
 
     # --- BEARISH RULES ---
+
+    # R10a: Soft low-liquidity penalty ($5K-$20K range)
+    # Not a hard gate — token can still pass if bullish signals are strong.
+    # Gapple case: liq=$14K, scored 68, pumped 3x. Hard gate killed it.
+    if 5_000 <= liq < 20_000:
+        r = SignalRule(
+            "low_liquidity_soft", -2,
+            f"Low liquidity ${liq:,.0f} (risky, but may pump)",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
 
     # R10: Honeypot
     if security and security.is_honeypot:
