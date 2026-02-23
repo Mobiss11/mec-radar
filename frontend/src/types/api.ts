@@ -133,6 +133,7 @@ export interface PositionItem {
   id: number
   token_address: string
   symbol: string | null
+  source: string | null
   entry_price: number | null
   current_price: number | null
   amount_sol_invested: number | null

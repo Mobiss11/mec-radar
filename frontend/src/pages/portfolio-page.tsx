@@ -51,6 +51,42 @@ const SUBTITLE: Record<PortfolioMode, string> = {
   all: "All trading combined",
 }
 
+/** Map raw token source to display label + color classes */
+function getSourceConfig(source: string | null | undefined): {
+  label: string
+  className: string
+} | null {
+  if (!source) return null
+  if (source.startsWith("pumpportal") || source === "pumpfun")
+    return { label: "pump.fun", className: "bg-fuchsia-500/15 text-fuchsia-400" }
+  if (source.startsWith("meteora"))
+    return { label: "meteora", className: "bg-cyan-500/15 text-cyan-400" }
+  if (source.startsWith("gmgn"))
+    return { label: "gmgn", className: "bg-emerald-500/15 text-emerald-400" }
+  if (source.startsWith("dexscreener"))
+    return { label: "dexscreener", className: "bg-amber-500/15 text-amber-400" }
+  if (source.startsWith("chainstack") || source === "grpc")
+    return { label: "gRPC", className: "bg-violet-500/15 text-violet-400" }
+  if (source === "raydium")
+    return { label: "raydium", className: "bg-sky-500/15 text-sky-400" }
+  return { label: source.slice(0, 12), className: "bg-muted text-muted-foreground" }
+}
+
+function SourceBadge({ source }: { source: string | null }) {
+  const config = getSourceConfig(source)
+  if (!config) return null
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold",
+        config.className,
+      )}
+    >
+      {config.label}
+    </span>
+  )
+}
+
 export function PortfolioPage() {
   const [mode, setMode] = useState<PortfolioMode>("paper")
   const [posStatus, setPosStatus] = useState("open")
@@ -328,6 +364,8 @@ export function PortfolioPage() {
                       {(p.symbol as string) ?? "???"}
                     </span>
                     <AddressBadge address={p.token_address as string} />
+                    {/* Source badge (pump.fun, meteora, etc.) */}
+                    <SourceBadge source={p.source as string | null} />
                     {/* REAL badge for on-chain positions */}
                     {p.is_paper === false && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">

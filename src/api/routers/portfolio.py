@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.auth import verify_csrf_token
 from src.api.dependencies import get_current_user, get_session
 from src.api.metrics_registry import registry
+from src.models.token import Token
 from src.models.trade import Position, Trade
 
 router = APIRouter(prefix="/api/v1/portfolio", tags=["portfolio"])
@@ -116,7 +117,8 @@ async def list_positions(
 ) -> dict[str, Any]:
     """List trading positions — paper, real, or all."""
     query = (
-        select(Position)
+        select(Position, Token.source)
+        .join(Token, Position.token_id == Token.id, isouter=True)
         .where(_is_paper_filter(mode), Position.status == pos_status)
     )
 
@@ -127,14 +129,15 @@ async def list_positions(
     query = query.order_by(order).limit(limit + 1)
 
     result = await session.execute(query)
-    positions = result.scalars().all()
+    rows = result.all()
+    positions = [(row[0], row[1]) for row in rows]  # (Position, source)
 
     has_more = len(positions) > limit
     page = positions[:limit]
 
     # Batch-load tx_hash from Trade for real positions (Position has no tx_hash column)
     tx_hash_map: dict[int, str | None] = {}
-    real_token_ids = [p.token_id for p in page if not p.is_paper]
+    real_token_ids = [p.token_id for p, _src in page if not p.is_paper]
     if real_token_ids:
         # Get first tx_hash per token (buy side) for real trades
         tx_result = await session.execute(
@@ -147,11 +150,12 @@ async def list_positions(
                 tx_hash_map[row.token_id] = row.tx_hash
 
     items = []
-    for p in page:
+    for p, token_source in page:
         items.append({
             "id": p.id,
             "token_address": p.token_address,
             "symbol": p.symbol,
+            "source": token_source,
             "entry_price": float(p.entry_price) if p.entry_price else None,
             "current_price": float(p.current_price) if p.current_price else None,
             "amount_sol_invested": float(p.amount_sol_invested) if p.amount_sol_invested else None,
@@ -178,11 +182,14 @@ async def position_detail(
 ) -> dict[str, Any]:
     """Position detail with trades."""
     result = await session.execute(
-        select(Position).where(Position.id == position_id)
+        select(Position, Token.source)
+        .join(Token, Position.token_id == Token.id, isouter=True)
+        .where(Position.id == position_id)
     )
-    pos = result.scalar_one_or_none()
-    if not pos:
+    row = result.one_or_none()
+    if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Position not found")
+    pos, token_source = row
 
     # Related trades — filter by same is_paper as the position
     trade_result = await session.execute(
@@ -196,6 +203,7 @@ async def position_detail(
         "id": pos.id,
         "token_address": pos.token_address,
         "symbol": pos.symbol,
+        "source": token_source,
         "entry_price": float(pos.entry_price) if pos.entry_price else None,
         "current_price": float(pos.current_price) if pos.current_price else None,
         "amount_token": float(pos.amount_token) if pos.amount_token else None,
