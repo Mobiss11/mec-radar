@@ -51,6 +51,24 @@ const SUBTITLE: Record<PortfolioMode, string> = {
   all: "All trading combined",
 }
 
+type PnlFilter = "all" | "profit" | "loss"
+type PeriodFilter = "1h" | "3h" | "12h" | "1d" | "1mo" | "all"
+
+const PNL_FILTERS: { value: PnlFilter; label: string; icon?: typeof TrendingUp }[] = [
+  { value: "all", label: "All" },
+  { value: "profit", label: "Profit", icon: TrendingUp },
+  { value: "loss", label: "Loss", icon: TrendingDown },
+]
+
+const PERIOD_FILTERS: { value: PeriodFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "1h", label: "1h" },
+  { value: "3h", label: "3h" },
+  { value: "12h", label: "12h" },
+  { value: "1d", label: "1d" },
+  { value: "1mo", label: "1mo" },
+]
+
 /** Detect platform from token address suffix */
 function detectPlatform(address: string | null | undefined): string | null {
   if (!address) return null
@@ -120,11 +138,13 @@ export function PortfolioPage() {
   const [confirmId, setConfirmId] = useState<number | null>(null)
   const { csrfToken, refreshCsrf } = useAuth()
   const [refreshKey, setRefreshKey] = useState(0)
+  const [pnlFilter, setPnlFilter] = useState<PnlFilter>("all")
+  const [period, setPeriod] = useState<PeriodFilter>("all")
 
   const { data: summary, loading: sumLoading } = usePolling({
-    fetcher: () => portfolio.summary(mode),
+    fetcher: () => portfolio.summary(mode, pnlFilter, period),
     interval: 15000,
-    key: `summary-${mode}-${refreshKey}`,
+    key: `summary-${mode}-${pnlFilter}-${period}-${refreshKey}`,
   })
 
   const posFetcher = useCallback(
@@ -133,15 +153,17 @@ export function PortfolioPage() {
         mode,
         status: posStatus,
         limit: 20,
+        pnl_filter: pnlFilter,
+        period,
         ...(cursor != null ? { cursor } : {}),
       }),
-    [mode, posStatus, cursor],
+    [mode, posStatus, cursor, pnlFilter, period],
   )
 
   const { data: posData, loading: posLoading } = usePolling({
     fetcher: posFetcher,
     interval: 15000,
-    key: `pos-${mode}-${posStatus}-${cursor}-${refreshKey}`,
+    key: `pos-${mode}-${posStatus}-${cursor}-${pnlFilter}-${period}-${refreshKey}`,
   })
 
   const { data: pnlData, loading: pnlLoading } = usePolling({
@@ -361,6 +383,55 @@ export function PortfolioPage() {
               >
                 {st}
               </Button>
+            ))}
+          </div>
+        </div>
+
+        {/* PnL + Period filters */}
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          {/* PnL filter */}
+          <div className="flex gap-1 rounded-lg border border-border/50 bg-card/30 p-0.5">
+            {PNL_FILTERS.map((f) => {
+              const Icon = f.icon
+              return (
+                <button
+                  key={f.value}
+                  onClick={() => { setPnlFilter(f.value); setCursor(undefined) }}
+                  className={cn(
+                    "flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-all",
+                    pnlFilter === f.value
+                      ? f.value === "profit"
+                        ? "bg-emerald-500/15 text-emerald-400 shadow-sm"
+                        : f.value === "loss"
+                          ? "bg-red-500/15 text-red-400 shadow-sm"
+                          : "bg-primary/10 text-primary shadow-sm"
+                      : "text-muted-foreground hover:text-foreground hover:bg-card/50",
+                  )}
+                >
+                  {Icon && <Icon className="h-3 w-3" />}
+                  {f.label}
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="h-4 w-px bg-border/50" />
+
+          {/* Period filter */}
+          <div className="flex gap-1 rounded-lg border border-border/50 bg-card/30 p-0.5">
+            {PERIOD_FILTERS.map((f) => (
+              <button
+                key={f.value}
+                onClick={() => { setPeriod(f.value); setCursor(undefined) }}
+                className={cn(
+                  "rounded-md px-2.5 py-1 text-xs font-medium transition-all",
+                  period === f.value
+                    ? "bg-primary/10 text-primary shadow-sm"
+                    : "text-muted-foreground hover:text-foreground hover:bg-card/50",
+                )}
+              >
+                {f.label}
+              </button>
             ))}
           </div>
         </div>

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
-from sqlalchemy import case, desc, func, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.auth import verify_csrf_token
@@ -38,27 +39,72 @@ def _is_paper_filter_trade(mode: str):
     return True
 
 
+# -- Portfolio filter helpers (PnL + time period) --
+
+_PERIOD_HOURS = {"1h": 1, "3h": 3, "12h": 12, "1d": 24, "1mo": 720}
+
+
+def _pnl_filter_condition(pnl_filter: str):
+    """SQLAlchemy filter for PnL: profit / loss / all."""
+    if pnl_filter == "profit":
+        return Position.pnl_pct > 0
+    elif pnl_filter == "loss":
+        return Position.pnl_pct <= 0
+    return True  # "all"
+
+
+def _period_cutoff(period: str) -> datetime | None:
+    """Return naive-UTC cutoff datetime for period, or None for 'all'."""
+    if period == "all":
+        return None
+    delta = _PERIOD_HOURS[period]
+    return datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=delta)
+
+
+def _period_filter(period: str, pos_status: str):
+    """SQLAlchemy filter: opened_at (open) or closed_at (closed) >= cutoff."""
+    cutoff = _period_cutoff(period)
+    if cutoff is None:
+        return True
+    col = Position.opened_at if pos_status == "open" else Position.closed_at
+    return col >= cutoff
+
+
 @router.get("/summary")
 async def portfolio_summary(
     session: AsyncSession = Depends(get_session),
     _user: dict = Depends(get_current_user),
     mode: str = Query("paper", pattern="^(paper|real|all)$"),
+    pnl_filter: str = Query("all", pattern="^(all|profit|loss)$"),
+    period: str = Query("all", pattern="^(1h|3h|12h|1d|1mo|all)$"),
 ) -> dict[str, Any]:
-    """Portfolio summary — paper, real, or combined."""
-    # Use trader's built-in summary for single-mode fast path
-    if mode == "paper" and registry.paper_trader:
-        summary = await registry.paper_trader.get_portfolio_summary(session)
-        summary["mode"] = "paper"
-        summary["real_trading_enabled"] = registry.real_trader is not None
-        return summary
-    if mode == "real" and registry.real_trader:
-        summary = await registry.real_trader.get_portfolio_summary(session)
-        summary["mode"] = "real"
-        summary["real_trading_enabled"] = True
-        return summary
+    """Portfolio summary — paper, real, or combined. Supports PnL + period filters."""
+    # Use trader's built-in summary for single-mode fast path (only when no filters)
+    if pnl_filter == "all" and period == "all":
+        if mode == "paper" and registry.paper_trader:
+            summary = await registry.paper_trader.get_portfolio_summary(session)
+            summary["mode"] = "paper"
+            summary["real_trading_enabled"] = registry.real_trader is not None
+            return summary
+        if mode == "real" and registry.real_trader:
+            summary = await registry.real_trader.get_portfolio_summary(session)
+            summary["mode"] = "real"
+            summary["real_trading_enabled"] = True
+            return summary
 
-    # Fallback / "all" mode: query directly
+    # Filtered / "all" mode: query directly
     paper_filter = _is_paper_filter(mode)
+    pnl_cond = _pnl_filter_condition(pnl_filter)
+
+    # Period filter for summary: open positions by opened_at, closed by closed_at
+    cutoff = _period_cutoff(period)
+    period_cond: Any = True
+    if cutoff is not None:
+        period_cond = or_(
+            (Position.status == "open") & (Position.opened_at >= cutoff),
+            (Position.status == "closed") & (Position.closed_at >= cutoff),
+        )
+
     result = await session.execute(
         select(
             func.count().filter(Position.status == "open").label("open_count"),
@@ -73,7 +119,7 @@ async def portfolio_summary(
             func.count().filter(
                 (Position.status == "closed") & (Position.pnl_pct <= 0)
             ).label("losses"),
-        ).where(paper_filter)
+        ).where(paper_filter, pnl_cond, period_cond)
     )
     row = result.one()
 
@@ -114,12 +160,19 @@ async def list_positions(
     pos_status: str = Query("open", alias="status", max_length=20),
     cursor: int | None = Query(None, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    pnl_filter: str = Query("all", pattern="^(all|profit|loss)$"),
+    period: str = Query("all", pattern="^(1h|3h|12h|1d|1mo|all)$"),
 ) -> dict[str, Any]:
-    """List trading positions — paper, real, or all."""
+    """List trading positions — paper, real, or all. Supports PnL + period filters."""
     query = (
         select(Position, Token.source)
         .join(Token, Position.token_id == Token.id, isouter=True)
-        .where(_is_paper_filter(mode), Position.status == pos_status)
+        .where(
+            _is_paper_filter(mode),
+            Position.status == pos_status,
+            _pnl_filter_condition(pnl_filter),
+            _period_filter(period, pos_status),
+        )
     )
 
     if cursor:

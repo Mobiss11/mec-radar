@@ -105,8 +105,10 @@ export const signals = {
 
 /* Portfolio */
 export const portfolio = {
-  summary: (mode = "paper") =>
-    request<Record<string, unknown>>(`/portfolio/summary?mode=${mode}`),
+  summary: (mode = "paper", pnlFilter = "all", period = "all") =>
+    request<Record<string, unknown>>(
+      `/portfolio/summary?mode=${mode}&pnl_filter=${pnlFilter}&period=${period}`,
+    ),
   positions: (params: Record<string, string | number>) => {
     const qs = new URLSearchParams()
     for (const [k, v] of Object.entries(params)) {
