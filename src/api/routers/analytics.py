@@ -125,13 +125,13 @@ async def top_performers(
             Token.address,
             Token.symbol,
             Token.name,
-            TokenOutcome.multiplier,
+            TokenOutcome.peak_multiplier,
             TokenOutcome.peak_mcap,
             TokenOutcome.is_rug,
         )
         .join(TokenOutcome, Token.id == TokenOutcome.token_id)
-        .where(TokenOutcome.multiplier.isnot(None), TokenOutcome.multiplier > 1)
-        .order_by(desc(TokenOutcome.multiplier))
+        .where(TokenOutcome.peak_multiplier.isnot(None), TokenOutcome.peak_multiplier > 1)
+        .order_by(desc(TokenOutcome.peak_multiplier))
         .limit(limit)
     )
     rows = result.all()

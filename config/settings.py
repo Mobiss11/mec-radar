@@ -122,7 +122,7 @@ class Settings(BaseSettings):
     real_slippage_bps: int = 500  # 5%
     real_min_liquidity_usd: float = 5000.0
     real_priority_fee_lamports: int = 100000  # 0.0001 SOL
-    real_max_sol_exposure: float = 0.5  # Max total SOL in open positions
+    real_max_sol_exposure: float = 0.8  # Max total SOL in open positions (2 × 0.375 strong_buy)
     real_circuit_breaker_threshold: int = 3  # Pause after N consecutive failures
     real_circuit_breaker_cooldown_sec: int = 1800  # 30 min cooldown
 
