@@ -100,9 +100,9 @@ GMGN (SOCKS5 proxy + circuit breaker), DexScreener, PumpPortal WS, RugCheck, GoP
   - IP: `178.156.247.90`
   - OS: Ubuntu 24.04 LTS
   - Path: `/opt/mec-radar`
-  - Service: `systemctl start|stop|restart mec-radar`
+  - Service: PM2 (`pm2 restart mec-radar`, `pm2 stop mec-radar`)
   - Dashboard: `http://178.156.247.90:8080`
-  - Logs: `journalctl -u mec-radar -f`
+  - Logs: `pm2 logs mec-radar --lines 100`
   - Python 3.12 + PostgreSQL 16 + Redis 7 + Node 22
 
 ## Команды
@@ -110,9 +110,9 @@ GMGN (SOCKS5 proxy + circuit breaker), DexScreener, PumpPortal WS, RugCheck, GoP
 # Dev (starts worker + dashboard on port 8080)
 .venv/bin/python -m src.main
 
-# Production
-systemctl restart mec-radar
-journalctl -u mec-radar -f
+# Production (PM2 only, systemd disabled)
+pm2 restart mec-radar
+pm2 logs mec-radar --lines 100
 
 # Тесты
 .venv/bin/python -m pytest tests/ -v
@@ -122,7 +122,7 @@ poetry run alembic upgrade head
 
 # Deploy update
 git push origin main
-ssh root@178.156.247.90 "cd /opt/mec-radar && git pull && .venv/bin/pip install -r requirements.txt && systemctl restart mec-radar"
+ssh root@178.156.247.90 "cd /opt/mec-radar && git pull && .venv/bin/pip install -r requirements.txt && pm2 restart mec-radar"
 
 # Линтинг
 ruff check . --fix
