@@ -114,9 +114,14 @@ export const portfolio = {
     for (const [k, v] of Object.entries(params)) {
       if (v !== "" && v != null) qs.set(k, String(v))
     }
-    return request<{ items: Array<Record<string, unknown>>; next_cursor: number | null; has_more: boolean }>(
-      `/portfolio/positions?${qs}`,
-    )
+    return request<{
+      items: Array<Record<string, unknown>>
+      next_cursor: number | null
+      has_more: boolean
+      total: number
+      page: number | null
+      total_pages: number | null
+    }>(`/portfolio/positions?${qs}`)
   },
   positionDetail: (id: number) =>
     request<Record<string, unknown>>(`/portfolio/positions/${id}`),

@@ -2,6 +2,7 @@ import { useCallback, useState } from "react"
 import { usePolling } from "@/hooks/use-polling"
 import { useAuth } from "@/hooks/use-auth"
 import { portfolio } from "@/lib/api"
+import { Pagination } from "@/components/common/pagination"
 import { StatCard } from "@/components/common/stat-card"
 import { AddressBadge } from "@/components/common/address-badge"
 import { EmptyState } from "@/components/common/empty-state"
@@ -15,7 +16,6 @@ import {
   TrendingUp,
   TrendingDown,
   Target,
-  ChevronRight,
   Wallet,
   ShieldCheck,
   ShieldAlert,
@@ -133,7 +133,7 @@ function SourceBadge({
 export function PortfolioPage() {
   const [mode, setMode] = useState<PortfolioMode>("paper")
   const [posStatus, setPosStatus] = useState("open")
-  const [cursor, setCursor] = useState<number | undefined>(undefined)
+  const [page, setPage] = useState(1)
   const [closingId, setClosingId] = useState<number | null>(null)
   const [confirmId, setConfirmId] = useState<number | null>(null)
   const { csrfToken, refreshCsrf } = useAuth()
@@ -153,17 +153,17 @@ export function PortfolioPage() {
         mode,
         status: posStatus,
         limit: 20,
+        page,
         pnl_filter: pnlFilter,
         period,
-        ...(cursor != null ? { cursor } : {}),
       }),
-    [mode, posStatus, cursor, pnlFilter, period],
+    [mode, posStatus, page, pnlFilter, period],
   )
 
   const { data: posData, loading: posLoading } = usePolling({
     fetcher: posFetcher,
     interval: 15000,
-    key: `pos-${mode}-${posStatus}-${cursor}-${pnlFilter}-${period}-${refreshKey}`,
+    key: `pos-${mode}-${posStatus}-${page}-${pnlFilter}-${period}-${refreshKey}`,
   })
 
   const { data: pnlData, loading: pnlLoading } = usePolling({
@@ -223,7 +223,7 @@ export function PortfolioPage() {
               key={tab.value}
               onClick={() => {
                 setMode(tab.value)
-                setCursor(undefined)
+                setPage(1)
               }}
               className={cn(
                 "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
@@ -378,7 +378,7 @@ export function PortfolioPage() {
                 className="text-xs capitalize"
                 onClick={() => {
                   setPosStatus(st)
-                  setCursor(undefined)
+                  setPage(1)
                 }}
               >
                 {st}
@@ -396,7 +396,7 @@ export function PortfolioPage() {
               return (
                 <button
                   key={f.value}
-                  onClick={() => { setPnlFilter(f.value); setCursor(undefined) }}
+                  onClick={() => { setPnlFilter(f.value); setPage(1) }}
                   className={cn(
                     "flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-all",
                     pnlFilter === f.value
@@ -422,7 +422,7 @@ export function PortfolioPage() {
             {PERIOD_FILTERS.map((f) => (
               <button
                 key={f.value}
-                onClick={() => { setPeriod(f.value); setCursor(undefined) }}
+                onClick={() => { setPeriod(f.value); setPage(1) }}
                 className={cn(
                   "rounded-md px-2.5 py-1 text-xs font-medium transition-all",
                   period === f.value
@@ -610,21 +610,13 @@ export function PortfolioPage() {
               </div>
             ))}
 
-            {posData?.has_more && positions.length > 0 && (
-              <div className="flex justify-center pt-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    setCursor(
-                      positions[positions.length - 1]?.id as number,
-                    )
-                  }
-                >
-                  Load more
-                  <ChevronRight className="h-4 w-4 ml-1" />
-                </Button>
-              </div>
+            {posData?.total_pages != null && posData.total_pages > 1 && (
+              <Pagination
+                page={posData.page ?? page}
+                totalPages={posData.total_pages}
+                onPageChange={setPage}
+                className="pt-3"
+              />
             )}
           </div>
         )}

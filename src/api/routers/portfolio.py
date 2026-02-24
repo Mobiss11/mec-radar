@@ -162,31 +162,61 @@ async def list_positions(
     limit: int = Query(20, ge=1, le=100),
     pnl_filter: str = Query("all", pattern="^(all|profit|loss)$"),
     period: str = Query("all", pattern="^(1h|3h|12h|1d|1mo|all)$"),
+    page_num: int = Query(1, ge=1, alias="page"),
 ) -> dict[str, Any]:
-    """List trading positions — paper, real, or all. Supports PnL + period filters."""
-    query = (
-        select(Position, Token.source)
-        .join(Token, Position.token_id == Token.id, isouter=True)
-        .where(
-            _is_paper_filter(mode),
-            Position.status == pos_status,
-            _pnl_filter_condition(pnl_filter),
-            _period_filter(period, pos_status),
-        )
-    )
+    """List trading positions — paper, real, or all. Supports PnL + period filters.
 
-    if cursor:
-        query = query.where(Position.id < cursor)
+    Supports two pagination modes:
+    - **Page-based** (preferred): pass `page=N` (1-indexed). Returns `total` count.
+    - **Cursor-based** (legacy): pass `cursor=ID`. Returns `has_more` + `next_cursor`.
+    """
+    base_filters = [
+        _is_paper_filter(mode),
+        Position.status == pos_status,
+        _pnl_filter_condition(pnl_filter),
+        _period_filter(period, pos_status),
+    ]
 
     order = desc(Position.opened_at) if pos_status == "open" else desc(Position.closed_at)
-    query = query.order_by(order).limit(limit + 1)
+
+    # Page-based pagination (when no cursor provided)
+    use_page_mode = cursor is None
+
+    if use_page_mode:
+        # Count total for page-based pagination
+        count_query = select(func.count()).select_from(Position).where(*base_filters)
+        total = (await session.execute(count_query)).scalar() or 0
+
+        offset = (page_num - 1) * limit
+        query = (
+            select(Position, Token.source)
+            .join(Token, Position.token_id == Token.id, isouter=True)
+            .where(*base_filters)
+            .order_by(order)
+            .offset(offset)
+            .limit(limit)
+        )
+    else:
+        # Legacy cursor-based pagination
+        total = 0
+        query = (
+            select(Position, Token.source)
+            .join(Token, Position.token_id == Token.id, isouter=True)
+            .where(*base_filters)
+        )
+        query = query.where(Position.id < cursor)
+        query = query.order_by(order).limit(limit + 1)
 
     result = await session.execute(query)
     rows = result.all()
     positions = [(row[0], row[1]) for row in rows]  # (Position, source)
 
-    has_more = len(positions) > limit
-    page = positions[:limit]
+    if use_page_mode:
+        has_more = (page_num * limit) < total
+        page = positions
+    else:
+        has_more = len(positions) > limit
+        page = positions[:limit]
 
     # Batch-load tx_hash from Trade for real positions (Position has no tx_hash column)
     tx_hash_map: dict[int, str | None] = {}
@@ -277,7 +307,15 @@ async def list_positions(
         })
 
     next_cursor = items[-1]["id"] if items and has_more else None
-    return {"items": items, "next_cursor": next_cursor, "has_more": has_more}
+    total_pages = (total + limit - 1) // limit if total > 0 else 1
+    return {
+        "items": items,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "total": total,
+        "page": page_num if use_page_mode else None,
+        "total_pages": total_pages if use_page_mode else None,
+    }
 
 
 @router.get("/positions/{position_id}")
