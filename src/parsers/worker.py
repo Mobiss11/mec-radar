@@ -34,11 +34,20 @@ _RUGGED_SYMBOLS_REDIS_KEY = "antiscam:rugged_symbols"  # Redis hash: symbol -> "
 
 
 def _get_copycat_ttl(count: int) -> int:
-    """Phase 35: Count-dependent TTL — mass scam symbols tracked longer."""
+    """Phase 35/44: Count-dependent TTL — serial scam symbols tracked longer.
+
+    Phase 44 fix: 马到成功 serial scammer (44 tokens, 7 rugs) bypassed copycat
+    because 2h TTL expired between batches (gap ~8h between 03:55→11:52 UTC).
+    Increased TTLs: count>=3 → 12h, >=7 → 24h, >=10 → 48h, >=50 → 72h.
+    """
     if count >= 50:
-        return 21600  # 6 hours
+        return 259200  # 72 hours
     if count >= 10:
-        return 14400  # 4 hours
+        return 172800  # 48 hours
+    if count >= 7:
+        return 86400  # 24 hours
+    if count >= 3:
+        return 43200  # 12 hours
     return _RUGGED_SYMBOLS_TTL  # 2 hours
 
 from config.settings import settings
@@ -142,13 +151,20 @@ from src.parsers.llm_analyzer.client import LLMAnalyzerClient, LLMAnalysisResult
 
 
 async def _load_rugged_symbols_from_redis() -> None:
-    """Load rugged symbols from Redis on startup. Survives process restarts."""
+    """Load rugged symbols from Redis + DB on startup. Survives process restarts.
+
+    Phase 44: Added DB fallback — loads rugged symbols from token_outcomes
+    for the last 72h. This catches serial scammers like 马到成功 (44 tokens,
+    7 rugs) whose Redis TTL expired during overnight gaps.
+    """
+    now_mono = _time_mod.monotonic()
+    now_unix = _time_mod.time()
+
+    # 1. Load from Redis (fast, in-memory)
+    redis_loaded = 0
     try:
         redis = await get_redis()
         raw = await redis.hgetall(_RUGGED_SYMBOLS_REDIS_KEY)
-        now_mono = _time_mod.monotonic()
-        now_unix = _time_mod.time()
-        loaded = 0
         for sym, val in raw.items():
             # Format: "count:unix_timestamp"
             parts = val.split(":")
@@ -162,14 +178,59 @@ async def _load_rugged_symbols_from_redis() -> None:
                 # Convert unix time to monotonic-equivalent
                 mono_ts = now_mono - age_seconds
                 _RUGGED_SYMBOLS[sym.upper()] = (mono_ts, count)
-                loaded += 1
+                redis_loaded += 1
             else:
                 # Expired — clean up from Redis
                 await redis.hdel(_RUGGED_SYMBOLS_REDIS_KEY, sym)
-        if loaded:
-            logger.info(f"[COPYCAT] Loaded {loaded} rugged symbols from Redis")
+        if redis_loaded:
+            logger.info(f"[COPYCAT] Loaded {redis_loaded} rugged symbols from Redis")
     except Exception as e:
         logger.warning(f"[COPYCAT] Failed to load from Redis: {e}")
+
+    # 2. DB fallback: load rugged symbols from token_outcomes (last 72h)
+    # This catches symbols missed by Redis TTL expiry or process restarts.
+    db_loaded = 0
+    try:
+        async with async_session_factory() as session:
+            from sqlalchemy import text as sa_text
+
+            rows = await session.execute(
+                sa_text(
+                    "SELECT UPPER(t.symbol) AS sym, COUNT(*) AS cnt "
+                    "FROM token_outcomes o "
+                    "JOIN tokens t ON t.id = o.token_id "
+                    "WHERE o.is_rug = true "
+                    "AND o.updated_at >= NOW() - INTERVAL '72 hours' "
+                    "AND t.symbol IS NOT NULL AND t.symbol != '' "
+                    "GROUP BY UPPER(t.symbol) "
+                    "HAVING COUNT(*) >= 2"
+                )
+            )
+            for row in rows:
+                sym = row.sym
+                cnt = row.cnt
+                existing = _RUGGED_SYMBOLS.get(sym)
+                if existing is None or existing[1] < cnt:
+                    # DB has more rugs than Redis — update
+                    _RUGGED_SYMBOLS[sym] = (now_mono, cnt)
+                    db_loaded += 1
+                    # Persist to Redis too
+                    try:
+                        redis = await get_redis()
+                        await redis.hset(
+                            _RUGGED_SYMBOLS_REDIS_KEY,
+                            sym,
+                            f"{cnt}:{now_unix:.0f}",
+                        )
+                    except Exception:
+                        pass
+        if db_loaded:
+            logger.info(
+                f"[COPYCAT] DB fallback: loaded {db_loaded} additional "
+                f"rugged symbols (total: {len(_RUGGED_SYMBOLS)})"
+            )
+    except Exception as e:
+        logger.warning(f"[COPYCAT] DB fallback failed: {e}")
 
 
 async def _track_rugged_symbol(symbol: str) -> None:
