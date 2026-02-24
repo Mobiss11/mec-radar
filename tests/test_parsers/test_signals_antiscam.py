@@ -887,6 +887,7 @@ class TestPhase35BacktestProfitable:
         """punchDance: liq=$8,281, +127% profit → must NOT be blocked.
 
         With R10a split: $8K-$20K → -2 (unchanged). Token had strong bullish.
+        Real punchDance had organic sell activity (not 0 sells).
         """
         snapshot = _make_snapshot(
             liquidity_usd=8281,
@@ -894,6 +895,7 @@ class TestPhase35BacktestProfitable:
             score=65,
             smart_wallets_count=3,
             buys_5m=80,
+            sells_5m=15,  # organic sell activity (R75 needs sells=0 to fire)
             buys_1h=300,
             sells_1h=30,
         )
@@ -1189,13 +1191,15 @@ class TestPhase38CompoundCopycatGuard:
         assert "copycat_serial_compound" not in result.reasons
 
     def test_punchdance_127pct_not_blocked(self):
-        """punchDance +127%: LP burned, no copycat → unaffected."""
+        """punchDance +127%: LP burned, no copycat → unaffected.
+        Real punchDance had organic sell activity."""
         snapshot = _make_snapshot(
             liquidity_usd=8281,
             holders_count=200,
             score=70,
             smart_wallets_count=3,
             buys_5m=60,
+            sells_5m=12,  # organic sell activity
             buys_1h=250,
             sells_1h=25,
         )

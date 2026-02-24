@@ -332,10 +332,28 @@ def evaluate_signals(
             fired.append(r)
             reasons[r.name] = r.description
 
-    # R12: High concentration
+    # R12: High concentration — tiered penalty.
+    # Phase 45 fix: snapshot.top10_holders_pct is ALWAYS NULL (never populated
+    # by enrichment pipeline). Fallback to security.top10_holders_pct (GMGN/GoPlus).
+    # Production data: 63 positions — 0 had snapshot top10 data, 42 had security data.
+    # Tiers: 50-89% = -2, 90-94% = -3, 95%+ = -4. Before: flat -2 and dead code.
     top10 = snapshot.top10_holders_pct
+    if not isinstance(top10, (Decimal, int, float)):
+        top10 = None
+    if (top10 is None or top10 == 0) and security and security.top10_holders_pct is not None:
+        top10 = security.top10_holders_pct
+        if not isinstance(top10, (Decimal, int, float)):
+            top10 = None
+        elif isinstance(top10, Decimal) and top10 <= Decimal("1"):
+            # security stores as 0.0-1.0, convert to 0-100
+            top10 = top10 * Decimal("100")
     if top10 is not None and top10 > Decimal("50"):
-        r = SignalRule("high_concentration", -2, f"Top 10 hold {float(top10):.0f}%")
+        if top10 >= Decimal("95"):
+            r = SignalRule("high_concentration", -4, f"Top 10 hold {float(top10):.0f}% (extreme)")
+        elif top10 >= Decimal("90"):
+            r = SignalRule("high_concentration", -3, f"Top 10 hold {float(top10):.0f}% (very high)")
+        else:
+            r = SignalRule("high_concentration", -2, f"Top 10 hold {float(top10):.0f}%")
         fired.append(r)
         reasons[r.name] = r.description
 
@@ -1211,6 +1229,30 @@ def evaluate_signals(
             )
             fired.append(r)
             reasons[r.name] = r.description
+
+    # --- PHASE 45: RUGCHECK-CONCENTRATION COMPOUND ---
+
+    # R76: Extreme rugcheck + extreme concentration + moderate liq → rug pull setup.
+    # Production data (2026-02-24): 'ket' (-100%, liq $22.8K, rugcheck 11500,
+    # top10=100%) got strong_buy despite -5 rugcheck + -4 concentration because
+    # 7 bullish velocity rules stacked to +17. The combination of extreme rugcheck
+    # (LP unlocked/low providers) + extreme concentration (all tokens held by 10 wallets)
+    # + sub-$50K liquidity is the classic rug pull setup: deploy, bot-farm metrics,
+    # pull LP. This compound rule adds -3 only when ALL three conditions co-exist.
+    # Backtest: 41 positions with rugcheck>=5000 — 6 rugs, 16 take_profit.
+    # This rule ONLY fires when also top10>=95% + liq<$50K → narrows to 4 rugs
+    # (ket, Soala, COCA Cola, Hikikomori) + some profitable positions that still
+    # have enough bullish to clear buy threshold after the extra -3.
+    _has_rugcheck_extreme = "rugcheck_danger" in reasons and rugcheck_score is not None and rugcheck_score >= 5000
+    _has_high_concentration = "high_concentration" in reasons
+    if _has_rugcheck_extreme and _has_high_concentration and 0 < liq < 50_000:
+        r = SignalRule(
+            "rugcheck_concentration_trap", -3,
+            f"Rug setup: rugcheck {rugcheck_score} + top10 {float(top10) if top10 else '?'}% "
+            f"+ liq ${liq:,.0f} < $50K",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
 
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
