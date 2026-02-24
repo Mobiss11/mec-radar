@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     real_trading_enabled: bool = False
     wallet_private_key: str = ""  # Base58 secret key — NEVER LOG THIS
     real_sol_per_trade: float = 0.05  # ~$4.15 at SOL=$83
-    real_max_positions: int = 3
+    real_max_positions: int = 5
     real_take_profit_x: float = 1.5  # Phase 42: aligned with paper (was 2.0)
     real_stop_loss_pct: float = -50.0
     real_timeout_hours: int = 8
