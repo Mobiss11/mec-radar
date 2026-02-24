@@ -990,19 +990,18 @@ def evaluate_signals(
 
     # R58: Bot-farmed holders — removed rugcheck dependency, added liq floor.
     # Production showed rugcheck bypasses (score=2401, or missing).
-    # Phase 39: lowered liq floor from $20K to $8K, added prev_holders >= 10 guard.
-    # MOLTGEN had $13K liq, growth 1→139 = +13800% — bypassed old $20K floor.
-    # The prev_holders guard prevents false positives from 1→N inflation
-    # (all PumpFun tokens start with 1 holder, organic growth 1→300 = +29900%).
-    # Production: ALL 20 profitable tokens in $8-20K range had prev_holders=1.
-    _prev_holders_r58 = prev_snapshot.holders_count if prev_snapshot and prev_snapshot.holders_count else 0
+    # Liq floor $20K prevents penalizing organic low-liq tokens where
+    # holder growth % is high simply from tiny starting count (5→30 = +500%).
+    # Phase 39 note: considered lowering to $8K with prev_holders guard, but
+    # production data showed 22 profitable tokens in $8-20K range with
+    # init_holders >= 10 and growth >= 500% — all take_profit. Reverted.
+    # MOLTGEN ($13K) caught by R15 (-4), R69 (-6), compound flag instead.
     if (
         holder_growth_pct is not None
         and holder_growth_pct >= 500
         and token_age_minutes is not None
         and token_age_minutes <= 2
-        and liq > 8_000  # Floor: very low-liq tokens safe (was $20K)
-        and _prev_holders_r58 >= 10  # Guard: skip 1→N inflation (organic PumpFun growth)
+        and liq > 20_000  # Floor: organic low-liq tokens safe
     ):
         r = SignalRule(
             "bot_holder_farming", -3,

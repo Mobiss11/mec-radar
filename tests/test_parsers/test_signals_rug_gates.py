@@ -792,18 +792,15 @@ class TestAntiRugRules:
     # --- R58 Bot Holder Farming (Phase 31b: removed rugcheck, added liq floor) ---
 
     def test_r58_bot_farming_detected(self):
-        """Holder growth +5100% in 0.8m on $174K pool with prev_holders >= 10 → suspicious."""
+        """Holder growth +5100% in 0.8m on $174K pool → suspicious."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174000"),
             market_cap=Decimal("261000"),
         )
-        # Phase 39: prev_snapshot with >= 10 holders required
-        prev = _make_snapshot(holders_count=15)
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_growth_pct=5100.0,
             token_age_minutes=0.8,
-            prev_snapshot=prev,
         )
         assert "bot_holder_farming" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "bot_holder_farming")
@@ -815,60 +812,26 @@ class TestAntiRugRules:
             liquidity_usd=Decimal("50000"),
             market_cap=Decimal("75000"),
         )
-        prev = _make_snapshot(holders_count=20)
         result = evaluate_signals(
             snapshot, _make_security(),
             rugcheck_score=None,  # No rugcheck!
             holder_growth_pct=600.0,
             token_age_minutes=1.0,
-            prev_snapshot=prev,
         )
         assert "bot_holder_farming" in result.reasons
 
     def test_r58_not_on_low_liq(self):
-        """R58 does NOT fire on very low-liq pool (floor $8K, Phase 39)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("7000"),
-            market_cap=Decimal("5000"),
-        )
-        prev = _make_snapshot(holders_count=15)
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            holder_growth_pct=800.0,
-            token_age_minutes=1.0,
-            prev_snapshot=prev,
-        )
-        assert "bot_holder_farming" not in result.reasons
-
-    def test_r58_not_on_low_prev_holders(self):
-        """R58 does NOT fire when prev_holders < 10 (Phase 39: 1→N inflation guard)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("50000"),
-            market_cap=Decimal("75000"),
-        )
-        prev = _make_snapshot(holders_count=1)
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            holder_growth_pct=5000.0,
-            token_age_minutes=1.0,
-            prev_snapshot=prev,
-        )
-        assert "bot_holder_farming" not in result.reasons
-
-    def test_r58_fires_on_8k_to_20k_liq_with_prev_holders(self):
-        """R58 fires on $8K-$20K liq when prev_holders >= 10 (Phase 39)."""
+        """R58 does NOT fire on low-liq pool (floor $20K prevents false positives)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("14000"),
             market_cap=Decimal("8000"),
         )
-        prev = _make_snapshot(holders_count=12)
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_growth_pct=800.0,
             token_age_minutes=1.0,
-            prev_snapshot=prev,
         )
-        assert "bot_holder_farming" in result.reasons
+        assert "bot_holder_farming" not in result.reasons
 
     def test_r58_not_on_low_growth(self):
         """R58 does NOT fire on moderate holder growth (<500%)."""
