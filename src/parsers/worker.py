@@ -3329,6 +3329,7 @@ async def _enrich_token(
                                 symbol=token.symbol,
                                 liquidity_usd=float(snapshot.liquidity_usd) if snapshot.liquidity_usd else None,
                                 sol_price_usd=_sol_price,
+                                lp_removed_pct=lp_removed_pct_val,
                             )
                             if pos is None:
                                 logger.warning(
@@ -3377,6 +3378,7 @@ async def _enrich_token(
                                 symbol=token.symbol,
                                 liquidity_usd=float(snapshot.liquidity_usd) if snapshot.liquidity_usd else None,
                                 sol_price_usd=_sol_price_r,
+                                lp_removed_pct=lp_removed_pct_val,
                             )
                             if pos is None:
                                 logger.warning(

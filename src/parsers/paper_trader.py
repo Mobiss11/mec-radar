@@ -52,6 +52,7 @@ class PaperTrader:
         symbol: str | None = None,
         liquidity_usd: float | None = None,
         sol_price_usd: float | None = None,
+        lp_removed_pct: float | None = None,
     ) -> Position | None:
         """Open a paper position when a qualifying signal fires.
 
@@ -63,6 +64,16 @@ class PaperTrader:
 
         if price is None or price <= 0:
             logger.warning(f"[PAPER] Skipping signal {signal.token_address[:12]}: invalid price={price}")
+            return None
+
+        # Phase 30b: Block entry if LP already partially removed (scam in progress).
+        # ALITA entered at MIN_5 with 49.98% LP removed → lost 100%.
+        # All profitable positions had lp_removed = 0% at entry.
+        if lp_removed_pct is not None and lp_removed_pct >= 30.0:
+            logger.warning(
+                f"[PAPER] Blocking entry for {signal.token_address[:12]}: "
+                f"LP removed {lp_removed_pct:.1f}% (scam in progress)"
+            )
             return None
 
         # Check max positions

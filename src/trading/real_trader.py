@@ -73,6 +73,7 @@ class RealTrader:
         symbol: str | None = None,
         liquidity_usd: float | None = None,
         sol_price_usd: float | None = None,
+        lp_removed_pct: float | None = None,
     ) -> Position | None:
         """Open a real position when a qualifying signal fires.
 
@@ -92,6 +93,14 @@ class RealTrader:
             return None
         if price is None or price <= 0:
             logger.warning(f"[REAL] Skipping signal {signal.token_address[:12]}: invalid price={price}")
+            return None
+
+        # Phase 30b: Block entry if LP already partially removed
+        if lp_removed_pct is not None and lp_removed_pct >= 30.0:
+            logger.warning(
+                f"[REAL] Blocking entry for {signal.token_address[:12]}: "
+                f"LP removed {lp_removed_pct:.1f}% (scam in progress)"
+            )
             return None
 
         # Circuit breaker

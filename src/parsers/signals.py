@@ -1012,6 +1012,42 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
+    # --- PHASE 30b SYBIL & GHOST DETECTION ---
+
+    # R67: Sybil holder inflation — holders vastly exceed actual buys.
+    # Scam pattern: airdrop tokens to thousands of wallets to fake "holder count",
+    # triggering bullish holder_velocity/acceleration rules.
+    # PEPSTEIN: 2771 holders / 6 buys = 461 holders/buy (pure sybil).
+    # All 56 profitable positions: max holders/buy = 0.61 (holders < buys).
+    # Threshold 5.0 gives 8x safety margin from max profit ratio.
+    _total_buys_r67 = buys_5m + (snapshot.buys_1h or 0)
+    if holders > 100 and _total_buys_r67 > 0:
+        _holders_per_buy = holders / _total_buys_r67
+        if _holders_per_buy > 5.0:
+            r = SignalRule(
+                "sybil_holder_inflation", -8,
+                f"Sybil holders: {holders} holders / {_total_buys_r67} buys "
+                f"= {_holders_per_buy:.1f} holders/buy (airdrop farming)",
+            )
+            fired.append(r)
+            reasons[r.name] = r.description
+
+    # R68: Ghost mcap — high market cap with near-zero trading volume.
+    # Scam pattern: pre-minted tokens with inflated supply, no real trading.
+    # PEPSTEIN: $481K mcap, $431 vol_1h = 0.09% turnover (dead token).
+    # All profitable positions: min vol/mcap = 5.3% — 10x safety margin.
+    # Only check when mcap > $100K (low-mcap tokens naturally have low vol).
+    if mcap > 100_000 and vol_1h_val >= 0 and buys_5m < 10:
+        _vol_mcap_pct = (vol_1h_val / mcap * 100) if mcap > 0 else 0
+        if _vol_mcap_pct < 1.0:
+            r = SignalRule(
+                "ghost_mcap", -5,
+                f"Ghost mcap: ${mcap:,.0f} cap with ${vol_1h_val:,.0f} vol "
+                f"({_vol_mcap_pct:.2f}% turnover, {buys_5m} buys)",
+            )
+            fired.append(r)
+            reasons[r.name] = r.description
+
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))
