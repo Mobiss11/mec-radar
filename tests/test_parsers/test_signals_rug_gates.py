@@ -1886,17 +1886,17 @@ class TestR12SecurityFallback:
 
     Phase 45 fix: snapshot.top10_holders_pct is ALWAYS NULL across all 63 production
     positions. R12 was dead code. Now falls back to security.top10_holders_pct.
-    Tiered: 50-89% = -2, 90-94% = -3, 95%+ = -4.
+    Phase 45b: soft -1 only (PumpFun top10 >= 95% is normal, tiered was destructive).
     """
 
     def test_r12_fires_from_security_when_snapshot_null(self):
-        """Snapshot top10 is None, security has 100% → R12 fires with -4."""
+        """Snapshot top10 is None, security has 100% → R12 fires with -1."""
         snapshot = _make_snapshot(top10_holders_pct=None)
-        security = _make_security(top10_holders_pct=Decimal("1.0"))  # 100% as 0-1 scale
+        security = _make_security(top10_holders_pct=Decimal("1.0"))
         result = evaluate_signals(snapshot, security, rugcheck_score=200)
         assert "high_concentration" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -4  # 100% >= 95% → extreme tier
+        assert rule.weight == -1
 
     def test_r12_fires_from_security_when_snapshot_zero(self):
         """Snapshot top10 = 0 (no data), security = 0.95 → R12 fires."""
@@ -1905,25 +1905,16 @@ class TestR12SecurityFallback:
         result = evaluate_signals(snapshot, security, rugcheck_score=200)
         assert "high_concentration" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -4  # 95% = extreme tier
+        assert rule.weight == -1
 
-    def test_r12_tier_90_to_94_gives_minus3(self):
-        """Security top10 = 92% → R12 fires with -3 (very high tier)."""
-        snapshot = _make_snapshot(top10_holders_pct=None)
-        security = _make_security(top10_holders_pct=Decimal("0.92"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=200)
-        assert "high_concentration" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -3
-
-    def test_r12_tier_50_to_89_gives_minus2(self):
-        """Security top10 = 70% → R12 fires with -2 (standard tier)."""
+    def test_r12_fires_on_70_pct(self):
+        """Security top10 = 70% → R12 fires with -1."""
         snapshot = _make_snapshot(top10_holders_pct=None)
         security = _make_security(top10_holders_pct=Decimal("0.70"))
         result = evaluate_signals(snapshot, security, rugcheck_score=200)
         assert "high_concentration" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -2
+        assert rule.weight == -1
 
     def test_r12_no_fire_below_50_pct(self):
         """Security top10 = 40% → below threshold, no penalty."""
@@ -1934,13 +1925,12 @@ class TestR12SecurityFallback:
 
     def test_r12_prefers_snapshot_over_security(self):
         """When snapshot HAS data, use it (not security fallback)."""
-        snapshot = _make_snapshot(top10_holders_pct=Decimal("60"))  # 60% in 0-100 scale
-        security = _make_security(top10_holders_pct=Decimal("0.95"))  # 95% in 0-1 scale
+        snapshot = _make_snapshot(top10_holders_pct=Decimal("60"))
+        security = _make_security(top10_holders_pct=Decimal("0.95"))
         result = evaluate_signals(snapshot, security, rugcheck_score=200)
         assert "high_concentration" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        # Uses snapshot 60% → standard tier -2 (not security 95% → -4)
-        assert rule.weight == -2
+        assert rule.weight == -1
 
     def test_r12_no_fire_without_security(self):
         """Snapshot NULL + no security → no penalty."""
@@ -1948,9 +1938,10 @@ class TestR12SecurityFallback:
         result = evaluate_signals(snapshot, None, rugcheck_score=200)
         assert "high_concentration" not in result.reasons
 
-    def test_r12_ket_real_scenario(self):
+    def test_r12_ket_soft_penalty(self):
         """Real ket token: snapshot top10=NULL, security top10=1.0 (100%).
-        Liq=$22.8K, rugcheck=11500 → should get -4 concentration penalty."""
+        Phase 45b: soft -1 only — ket is indistinguishable from profitable tokens
+        by top10 alone (MOOLT +239%, MEMESAI +50% also had 100%)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("22866"),
             market_cap=Decimal("16461"),
@@ -1974,118 +1965,4 @@ class TestR12SecurityFallback:
         )
         assert "high_concentration" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -4
-
-
-class TestR76RugcheckConcentrationTrap:
-    """R76: Compound rule — extreme rugcheck + extreme concentration + moderate liq.
-
-    Production data (2026-02-24): 'ket' had rugcheck=11500, top10=100%, liq=$22.8K.
-    7 bullish velocity rules (+17) overwhelmed individual penalties.
-    This compound rule adds -3 when ALL three red flags co-exist.
-    """
-
-    def test_r76_fires_ket_pattern(self):
-        """ket: rugcheck 11500 + top10 100% + liq $22.8K → compound fires."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22866"),
-            market_cap=Decimal("16461"),
-            holders_count=86,
-            volume_1h=Decimal("11816"),
-            volume_5m=Decimal("11816"),
-            buys_5m=87,
-            sells_5m=23,
-            buys_1h=87,
-            sells_1h=23,
-            score=56,
-            top10_holders_pct=None,
-        )
-        security = _make_security(top10_holders_pct=Decimal("1.0"))
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=11500,
-            holder_velocity=184.0,
-            token_age_minutes=0.5,
-            holder_growth_pct=153.0,
-        )
-        assert "rugcheck_concentration_trap" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "rugcheck_concentration_trap")
-        assert rule.weight == -3
-
-    def test_r76_not_on_clean_rugcheck(self):
-        """Rugcheck 2000 (below 5000) + top10 100% + low liq → no compound."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22000"),
-            top10_holders_pct=None,
-        )
-        security = _make_security(top10_holders_pct=Decimal("1.0"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=2000)
-        assert "rugcheck_concentration_trap" not in result.reasons
-
-    def test_r76_not_on_low_concentration(self):
-        """Rugcheck 11500 + top10 40% (below 50%) + low liq → no compound.
-        high_concentration doesn't fire, so compound can't either."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22000"),
-            top10_holders_pct=None,
-        )
-        security = _make_security(top10_holders_pct=Decimal("0.40"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=11500)
-        assert "rugcheck_concentration_trap" not in result.reasons
-
-    def test_r76_not_on_high_liq(self):
-        """Rugcheck 11500 + top10 100% + liq $60K → no compound (>= $50K)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("60000"),
-            top10_holders_pct=None,
-        )
-        security = _make_security(top10_holders_pct=Decimal("1.0"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=11500)
-        assert "rugcheck_concentration_trap" not in result.reasons
-
-    def test_r76_fires_at_49999_liq(self):
-        """At $49,999 (just below $50K) → compound fires."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("49999"),
-            top10_holders_pct=None,
-            holders_count=50,
-        )
-        security = _make_security(top10_holders_pct=Decimal("1.0"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
-        assert "rugcheck_concentration_trap" in result.reasons
-
-    def test_r76_reduces_ket_to_buy(self):
-        """Full ket scenario: with R12 -4 + R76 -3 + rugcheck -5, net should drop.
-        Real ket: lp_burned=NULL, lp_locked=false (no security_cleared bonus)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22866"),
-            market_cap=Decimal("16461"),
-            holders_count=86,
-            volume_1h=Decimal("11816"),
-            volume_5m=Decimal("11816"),
-            buys_5m=87,
-            sells_5m=23,
-            buys_1h=87,
-            sells_1h=23,
-            score=56,
-            top10_holders_pct=None,
-        )
-        # Real ket security: LP not burned/locked, contract not renounced
-        security = _make_security(
-            top10_holders_pct=Decimal("1.0"),
-            lp_burned=False,
-            lp_locked=False,
-            contract_renounced=False,
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=11500,
-            holder_velocity=184.0,
-            token_age_minutes=0.5,
-            holder_growth_pct=153.0,
-        )
-        # Before Phase 45: no concentration penalty → net ~12+ (strong_buy)
-        # After Phase 45: R12 -4 + R76 -3 = -7 extra bearish → net ~5 (buy)
-        assert result.action != "strong_buy"
-        assert "high_concentration" in result.reasons
-        assert "rugcheck_concentration_trap" in result.reasons
+        assert rule.weight == -1
