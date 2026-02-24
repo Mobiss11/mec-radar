@@ -1186,6 +1186,32 @@ def evaluate_signals(
         fired.append(r)
         reasons[r.name] = r.description
 
+    # --- PHASE 44: LOW-LIQ BOT WASH DETECTION ---
+
+    # R75: Bot wash on low-liquidity tokens — production data (2026-02-24):
+    # Volume/3NU2 (-100%): buys=451, sells=55, bs_ratio=8.2x, liq=$13K
+    # Volume/FM9f (-100%): buys=317, sells=2, bs_ratio=158.5x, liq=$13K
+    # Pattern: scammer deploys with ~$13K liq, bots flood buys with almost
+    # zero sells to inflate velocity metrics, then drains LP after 5-10 min.
+    # Key insight: on REAL organic low-liq tokens, sell_pct is 30-85%.
+    # Bot farms have <15% sells because bots only buy, never sell.
+    # Threshold: liq < $20K AND buy/sell ratio >= 8x (sell_pct < 12.5%).
+    # Backtest (45 positions): blocks 2 scams (-$76.57 saved),
+    # loses 1 edge-case Volume +20% (-$7.65). Net: +$68.92.
+    # All take_profit positions PASS (nelt +72%, think +79%, Volume +88%).
+    _has_low_liq_soft = "low_liquidity_soft" in reasons
+    if _has_low_liq_soft and buys_5m >= 20:
+        _bs_ratio_r75 = buys_5m / sells_5m if sells_5m > 0 else float("inf")
+        if _bs_ratio_r75 >= 8.0:
+            _sell_pct_r75 = (sells_5m / buys_5m * 100) if buys_5m > 0 else 0
+            r = SignalRule(
+                "low_liq_bot_wash", -5,
+                f"Bot wash: {buys_5m}B/{sells_5m}S (ratio {_bs_ratio_r75:.1f}x, "
+                f"{_sell_pct_r75:.0f}% sells) on ${liq:,.0f} liq",
+            )
+            fired.append(r)
+            reasons[r.name] = r.description
+
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))

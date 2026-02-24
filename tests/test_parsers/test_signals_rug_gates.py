@@ -1757,3 +1757,125 @@ class TestFakeLiquidityTrap:
         trap_rules = [r for r in result.rules_fired if r.name == "fake_liquidity_trap"]
         assert len(trap_rules) == 1
         assert trap_rules[0].weight == -5
+
+
+class TestLowLiqBotWash:
+    """R75: Bot wash on low-liquidity tokens — extreme buy/sell ratio."""
+
+    def test_r75_fires_low_liq_extreme_bs_ratio(self):
+        """$13K liq + 317 buys / 2 sells (158x ratio) → penalty fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13062"),
+            market_cap=Decimal("11031"),
+            holders_count=245,
+            volume_1h=Decimal("2170"),
+            volume_5m=Decimal("2170"),
+            buys_5m=317,
+            sells_5m=2,
+            buys_1h=317,
+            sells_1h=2,
+            score=43,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=80.0,
+            token_age_minutes=0.9,
+            holder_growth_pct=100.0,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "low_liq_bot_wash" in rule_names
+        assert "low_liquidity_soft" in rule_names
+
+    def test_r75_fires_moderate_bs_ratio_8x(self):
+        """$13K liq + 451 buys / 55 sells (8.2x ratio) → penalty fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13022"),
+            market_cap=Decimal("35013"),
+            holders_count=353,
+            volume_1h=Decimal("23670"),
+            volume_5m=Decimal("23670"),
+            buys_5m=451,
+            sells_5m=55,
+            buys_1h=451,
+            sells_1h=55,
+            score=58,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=100.0,
+            token_age_minutes=1.3,
+            holder_growth_pct=120.0,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "low_liq_bot_wash" in rule_names
+
+    def test_r75_skips_normal_sell_ratio(self):
+        """$13K liq + 146 buys / 100 sells (1.5x ratio) → no penalty."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13505"),
+            market_cap=Decimal("28489"),
+            holders_count=105,
+            volume_1h=Decimal("15588"),
+            volume_5m=Decimal("15588"),
+            buys_5m=146,
+            sells_5m=100,
+            buys_1h=146,
+            sells_1h=100,
+            score=42,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=50.0,
+            token_age_minutes=0.9,
+            holder_growth_pct=80.0,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "low_liq_bot_wash" not in rule_names
+
+    def test_r75_skips_high_liq(self):
+        """$50K liq + extreme bs ratio → no penalty (not low_liq_soft)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("50000"),
+            market_cap=Decimal("30000"),
+            holders_count=200,
+            volume_1h=Decimal("10000"),
+            volume_5m=Decimal("10000"),
+            buys_5m=300,
+            sells_5m=5,
+            buys_1h=300,
+            sells_1h=5,
+            score=50,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=80.0,
+            token_age_minutes=0.5,
+            holder_growth_pct=100.0,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "low_liq_bot_wash" not in rule_names
+        assert "strong_liquidity" in rule_names
+
+    def test_r75_penalty_weight_is_minus5(self):
+        """R75 has weight -5."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13000"),
+            market_cap=Decimal("10000"),
+            holders_count=200,
+            volume_1h=Decimal("5000"),
+            volume_5m=Decimal("5000"),
+            buys_5m=200,
+            sells_5m=3,
+            buys_1h=200,
+            sells_1h=3,
+            score=40,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=70.0,
+            token_age_minutes=1.0,
+            holder_growth_pct=90.0,
+        )
+        wash_rules = [r for r in result.rules_fired if r.name == "low_liq_bot_wash"]
+        assert len(wash_rules) == 1
+        assert wash_rules[0].weight == -5
