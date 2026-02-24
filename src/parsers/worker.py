@@ -31,6 +31,9 @@ from loguru import logger
 _RUGGED_SYMBOLS: dict[str, tuple[float, int]] = {}  # symbol_upper -> (monotonic_ts, rug_count)
 _RUGGED_SYMBOLS_TTL = 7200  # 2 hours (base TTL)
 _RUGGED_SYMBOLS_REDIS_KEY = "antiscam:rugged_symbols"  # Redis hash: symbol -> "count:ts_unix"
+# Phase 44: Track which token_ids already fed into _RUGGED_SYMBOLS via outcome detection.
+# Prevents inflating rug_count on re-enrichment of the same token.
+_OUTCOME_RUG_TRACKED: set[int] = set()
 
 
 def _get_copycat_ttl(count: int) -> int:
@@ -3517,7 +3520,7 @@ async def _enrich_token(
         if snapshot is not None and task.stage in _outcome_stages:
             is_initial = task.stage == EnrichmentStage.INITIAL
             is_final = task.stage == EnrichmentStage.HOUR_24
-            await upsert_token_outcome(
+            _outcome = await upsert_token_outcome(
                 session,
                 token.id,
                 snapshot,
@@ -3525,6 +3528,15 @@ async def _enrich_token(
                 is_final=is_final,
                 stage_name=task.stage.name,
             )
+            # Phase 44: Feed rug detections into copycat memory.
+            # Previously only paper/real price loops tracked rugged symbols,
+            # meaning 90%+ of rugs went untracked (only bought tokens were tracked).
+            # Now ANY token detected as rug by outcome tracking feeds _RUGGED_SYMBOLS.
+            # Guard: track once per token_id to avoid inflating count on re-enrichment.
+            if _outcome and _outcome.is_rug and token.symbol:
+                if token.id not in _OUTCOME_RUG_TRACKED:
+                    _OUTCOME_RUG_TRACKED.add(token.id)
+                    await _track_rugged_symbol(token.symbol)
 
         if enriched:
             await session.commit()
