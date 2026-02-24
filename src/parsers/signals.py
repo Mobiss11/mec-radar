@@ -1142,9 +1142,45 @@ def evaluate_signals(
             fired.append(r)
             reasons[r.name] = r.description
 
+    # --- PHASE 41: BOT FARM DETECTION ---
+
+    # R72: Low-liquidity velocity cap — production data (2026-02-24):
+    # Bot farms stack 6 velocity rules for +15 bullish on micro-liq tokens.
+    # Rugcheck -5 + liq penalty -2 = only -7 bearish → net +8 → strong_buy on scams.
+    # 75.5% of rugged positions had liq < $20K.
+    # Cap bullish at +8 when liq < $20K so bot-farmed velocity can't overwhelm bearish.
+    # At +8 bullish vs -7 bearish → net +1 → avoid. With clean token -2 bearish → net +6 → buy.
+    # This preserves legitimate low-liq tokens (they have fewer bearish flags) while
+    # stopping bot farms that always trigger both velocity bullish AND danger bearish.
+    _velocity_capped = False
+
+    # R73: Sell stagnation REMOVED after backtest (2026-02-24).
+    # At MIN_2 stage (T+42s), sells_1h ≈ sells_5m for ALL tokens (both profitable
+    # and rugged) because not enough time has passed. This metric only discriminates
+    # at MIN_5+ stages. Backtest showed 23 profitable false positives vs 14 rugged
+    # caught — unacceptable 0.6 ratio. Sell stagnation is a real signal but requires
+    # later-stage evaluation, not MIN_2.
+
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))
+
+    # R72: Apply velocity cap AFTER computing raw scores.
+    # Cap bullish at +8 when liq < $20K. This prevents bot-farmed velocity
+    # from overwhelming bearish signals on micro-liq tokens.
+    # Production: 91 profitable low-liq positions → 61 had bullish <= 8 (67%, unaffected).
+    # 30 had bullish > 8 → capped, but most had low bearish → still buy/strong_buy.
+    if liq > 0 and liq < 20_000 and bullish > 8:
+        _velocity_capped = True
+        _original_bullish = bullish
+        bullish = 8
+        r = SignalRule(
+            "low_liq_velocity_cap", 0,
+            f"Velocity cap: bullish {_original_bullish}→8 (liq ${liq:,.0f} < $20K)",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
     net = bullish - bearish
 
     # Phase 34: Copycat cap REMOVED after backtest.

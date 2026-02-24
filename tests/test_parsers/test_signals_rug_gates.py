@@ -1045,9 +1045,12 @@ class TestAntiRugRules:
 
     # --- Backtest: Profitable Tokens NOT Blocked ---
 
-    def test_profitable_hua_hua_not_blocked(self):
-        """Real profit: Hua Hua +102% at liq=$14.4K → NOT blocked."""
-        snapshot = _make_snapshot(
+    def test_profitable_hua_hua_capped_at_low_liq(self):
+        """Hua Hua: liq=$14K + rugcheck=11500 + velocity=511 = bot farm profile.
+        Phase 41 R72 correctly caps this — 36% of positions with this profile
+        are rugs in production. At higher liq ($25K), cap doesn't apply."""
+        # Low liq profile — R72 caps bullish, R69 fires compound penalty
+        snapshot_low = _make_snapshot(
             liquidity_usd=Decimal("14444"),
             market_cap=Decimal("8389"),
             holders_count=299,
@@ -1055,20 +1058,36 @@ class TestAntiRugRules:
             sells_1h=60,
             score=53,
         )
-        result = evaluate_signals(
-            snapshot, _make_security(),
+        result_low = evaluate_signals(
+            snapshot_low, _make_security(),
             rugcheck_score=11500,
             holder_growth_pct=1561.0,
             token_age_minutes=0.8,
             holder_velocity=511.0,
         )
-        # No graduation rules fire (liq < $100K)
-        assert "graduation_rug_structural" not in result.reasons
-        assert "extreme_graduation_growth" not in result.reasons
-        # R58 doesn't fire (liq < $20K)
-        assert "bot_holder_farming" not in result.reasons
-        # Can still reach buy/strong_buy
-        assert result.action in ("buy", "strong_buy", "watch")
+        # R72 correctly caps bot-farm-like velocity on micro-liq
+        assert "low_liq_velocity_cap" in result_low.reasons
+
+        # Same velocity at higher liq ($35K) → R72 cap AND R69 compound don't apply
+        # (R69 requires liq < $30K)
+        snapshot_high = _make_snapshot(
+            liquidity_usd=Decimal("35000"),
+            market_cap=Decimal("25000"),
+            holders_count=299,
+            buys_1h=359,
+            sells_1h=60,
+            score=53,
+        )
+        result_high = evaluate_signals(
+            snapshot_high, _make_security(),
+            rugcheck_score=11500,
+            holder_growth_pct=1561.0,
+            token_age_minutes=0.8,
+            holder_velocity=511.0,
+        )
+        assert "low_liq_velocity_cap" not in result_high.reasons
+        assert "velocity_danger_compound" not in result_high.reasons
+        assert result_high.action in ("buy", "strong_buy", "watch")
 
     def test_profitable_cash_not_blocked(self):
         """Real profit: CASH +111% at liq=$12.6K → NOT blocked."""
@@ -1497,3 +1516,143 @@ class TestHolderConcentrationDanger:
             # Compound fired but holder_concentration is NOT a reason
             desc = result.reasons["compound_scam_fingerprint"]
             assert "holder_concentration" not in desc
+
+
+class TestLowLiqVelocityCap:
+    """R72: Low-liquidity velocity cap (Phase 41).
+
+    Production data (2026-02-24):
+    - Bot farms stack 6 velocity rules for +15 bullish on liq < $20K
+    - 75.5% of rugged positions had liq < $20K
+    - Cap bullish at +8 when liq < $20K → bot-farmed scams can't overwhelm bearish
+    """
+
+    def test_r72_caps_bullish_at_8_on_low_liq(self):
+        """Bot farm pattern: liq $15K, 80 buys, velocity 200/min → +15 bullish.
+        With cap: bullish capped at 8, so bearish -7 → net +1 → avoid."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("9000"),
+            holders_count=80,
+            volume_1h=Decimal("10000"),
+            buys_5m=80,
+            sells_5m=2,
+            buys_1h=80,
+            sells_1h=2,
+            score=50,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=200.0,
+            rugcheck_score=11500,
+            token_age_minutes=0.5,
+            holder_growth_pct=200.0,
+        )
+        # Bullish should be capped at 8
+        assert result.bullish_score <= 8
+        assert "low_liq_velocity_cap" in result.reasons
+
+    def test_r72_not_at_20k_liq(self):
+        """At exactly $20K liq, cap does NOT apply."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("15000"),
+            holders_count=80,
+            volume_1h=Decimal("10000"),
+            buys_5m=80,
+            sells_5m=2,
+            buys_1h=80,
+            sells_1h=2,
+            score=50,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=200.0,
+            token_age_minutes=0.5,
+            holder_growth_pct=200.0,
+        )
+        assert "low_liq_velocity_cap" not in result.reasons
+
+    def test_r72_not_when_bullish_under_8(self):
+        """If bullish <= 8 naturally, cap doesn't apply (no capping needed)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("9000"),
+            holders_count=30,
+            volume_1h=Decimal("3000"),
+            score=45,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=2.0,
+        )
+        assert "low_liq_velocity_cap" not in result.reasons
+
+    def test_r72_scam_pattern_becomes_avoid(self):
+        """Full FROG-like scam: +15 bullish - 7 bearish = net +8 (strong_buy).
+        With R72 cap: +8 - 7 = net +1 → avoid."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("18000"),
+            market_cap=Decimal("9500"),
+            holders_count=75,
+            volume_1h=Decimal("10000"),
+            buys_5m=83,
+            sells_5m=5,
+            buys_1h=83,
+            sells_1h=5,
+            score=46,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=176.0,
+            rugcheck_score=11500,
+            token_age_minutes=0.5,
+            holder_growth_pct=200.0,
+        )
+        # Bullish capped at 8, rugcheck -5 + low_liq -2 = -7 bearish
+        # Net = 8 - 7 = +1 → avoid
+        assert result.bullish_score <= 8
+        assert result.action in ("avoid", "watch")
+
+    def test_r72_preserves_clean_low_liq_token(self):
+        """Clean low-liq token with moderate bullish — buy should still work.
+        Example: liq=$15K, score=60, 30 holders, no velocity stack. bullish ~5."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("15000"),
+            holders_count=30,
+            volume_1h=Decimal("35000"),
+            buys_5m=25,
+            sells_5m=10,
+            buys_1h=40,
+            sells_1h=20,
+            score=62,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            token_age_minutes=5.0,
+        )
+        # Clean token — bullish shouldn't be extremely high,
+        # no cap needed, can still get buy signal
+        assert result.action in ("buy", "strong_buy", "watch")
+
+    def test_r72_cap_fires_on_50k_liq_boundary(self):
+        """At liq=$19999 (just below $20K), cap applies if bullish > 8."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("19999"),
+            market_cap=Decimal("12000"),
+            holders_count=80,
+            volume_1h=Decimal("10000"),
+            buys_5m=80,
+            sells_5m=2,
+            buys_1h=80,
+            sells_1h=2,
+            score=50,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=200.0,
+            token_age_minutes=0.5,
+            holder_growth_pct=200.0,
+        )
+        assert result.bullish_score <= 8
