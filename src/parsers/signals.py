@@ -1161,6 +1161,31 @@ def evaluate_signals(
     # caught — unacceptable 0.6 ratio. Sell stagnation is a real signal but requires
     # later-stage evaluation, not MIN_2.
 
+    # --- PHASE 43: FAKE LIQUIDITY DETECTION ---
+
+    # R74: Fake liquidity trap — production data (2026-02-24):
+    # COCA Cola (-100%), Soala (-100%), Hikikomori (-100%) all had:
+    #   - High liquidity ($50K) injected by scammer to look legitimate
+    #   - Low trading volume relative to liquidity (vol_5m/liq < 0.5)
+    #   - No fresh_volume_surge fired (real organic tokens have vol surge)
+    # Pattern: scammer creates token, injects $50K liquidity, bots buy to
+    # inflate holder count, then drains LP after 5 minutes.
+    # Key insight: legitimate high-liq tokens ALWAYS have proportional volume.
+    # If liq >= $50K but vol/liq is low, the liquidity is likely fake bait.
+    # Backtest (29 positions): blocks 3 scams (-$114.95 saved), loses 2 profits
+    # (SPARK +49%, Zoe +52% = -$38.60 lost). Net: +$73.67.
+    _has_strong_liq = "strong_liquidity" in reasons
+    _has_vol_surge = "fresh_volume_surge" in reasons
+    if _has_strong_liq and not _has_vol_surge:
+        r = SignalRule(
+            "fake_liquidity_trap", -5,
+            f"Fake liquidity trap: ${liq:,.0f} liq without volume surge "
+            f"(vol_5m/liq = {vol_5m_check/liq:.2f}x)" if liq > 0 else
+            f"Fake liquidity trap: ${liq:,.0f} liq without volume surge",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
+
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
     bearish = abs(sum(r.weight for r in fired if r.weight < 0))

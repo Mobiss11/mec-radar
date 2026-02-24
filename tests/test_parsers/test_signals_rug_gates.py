@@ -1656,3 +1656,104 @@ class TestLowLiqVelocityCap:
             holder_growth_pct=200.0,
         )
         assert result.bullish_score <= 8
+
+
+class TestFakeLiquidityTrap:
+    """R74: Fake liquidity trap — high liq without proportional volume."""
+
+    def test_r74_fires_strong_liq_no_volume_surge(self):
+        """$50K liq + low volume (vol_5m/liq < 0.5) → penalty fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("50000"),
+            market_cap=Decimal("30000"),
+            holders_count=47,
+            volume_1h=Decimal("6900"),
+            volume_5m=Decimal("6900"),
+            buys_5m=40,
+            sells_5m=11,
+            buys_1h=40,
+            sells_1h=11,
+            score=45,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=60.0,
+            token_age_minutes=0.4,
+            holder_growth_pct=57.0,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "fake_liquidity_trap" in rule_names
+        assert "strong_liquidity" in rule_names
+        assert "fresh_volume_surge" not in rule_names
+
+    def test_r74_skips_when_volume_surge_present(self):
+        """$50K liq + high volume (vol_5m/liq >= 0.5) → no penalty."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("50000"),
+            market_cap=Decimal("30000"),
+            holders_count=59,
+            volume_1h=Decimal("50000"),
+            volume_5m=Decimal("30000"),
+            buys_5m=86,
+            sells_5m=48,
+            buys_1h=86,
+            sells_1h=48,
+            score=50,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=80.0,
+            token_age_minutes=0.4,
+            holder_growth_pct=64.0,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "fake_liquidity_trap" not in rule_names
+        assert "strong_liquidity" in rule_names
+        assert "fresh_volume_surge" in rule_names
+
+    def test_r74_skips_low_liq_tokens(self):
+        """$8K liq → no strong_liquidity → no fake_liquidity_trap."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("8000"),
+            market_cap=Decimal("8000"),
+            holders_count=30,
+            volume_1h=Decimal("3000"),
+            volume_5m=Decimal("3000"),
+            buys_5m=30,
+            sells_5m=10,
+            buys_1h=30,
+            sells_1h=10,
+            score=45,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=50.0,
+            token_age_minutes=0.4,
+        )
+        rule_names = [r.name for r in result.rules_fired]
+        assert "fake_liquidity_trap" not in rule_names
+        assert "strong_liquidity" not in rule_names
+
+    def test_r74_penalty_weight_is_minus5(self):
+        """R74 has weight -5."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("55000"),
+            market_cap=Decimal("30000"),
+            holders_count=40,
+            volume_1h=Decimal("5000"),
+            volume_5m=Decimal("5000"),
+            buys_5m=35,
+            sells_5m=5,
+            buys_1h=35,
+            sells_1h=5,
+            score=45,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=60.0,
+            token_age_minutes=0.4,
+            holder_growth_pct=50.0,
+        )
+        trap_rules = [r for r in result.rules_fired if r.name == "fake_liquidity_trap"]
+        assert len(trap_rules) == 1
+        assert trap_rules[0].weight == -5
