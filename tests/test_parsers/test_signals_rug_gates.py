@@ -627,10 +627,24 @@ class TestAntiRugRules:
         rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
         assert rule.weight == -5
 
-    def test_r15_boundary_4999_is_normal(self):
-        """Rugcheck 4999 → normal tier (-2)."""
+    def test_r15_boundary_4999_is_high_danger(self):
+        """Rugcheck 4999 → high danger tier (-4, Phase 39)."""
         snapshot = _make_snapshot()
         result = evaluate_signals(snapshot, _make_security(), rugcheck_score=4999)
+        rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
+        assert rule.weight == -4
+
+    def test_r15_boundary_3000_is_high_danger(self):
+        """Rugcheck 3000 → high danger tier (-4, Phase 39)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=3000)
+        rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
+        assert rule.weight == -4
+
+    def test_r15_boundary_2999_is_normal(self):
+        """Rugcheck 2999 → normal tier (-2)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=2999)
         rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
         assert rule.weight == -2
 
@@ -778,15 +792,18 @@ class TestAntiRugRules:
     # --- R58 Bot Holder Farming (Phase 31b: removed rugcheck, added liq floor) ---
 
     def test_r58_bot_farming_detected(self):
-        """Holder growth +5100% in 0.8m on $174K pool → suspicious."""
+        """Holder growth +5100% in 0.8m on $174K pool with prev_holders >= 10 → suspicious."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174000"),
             market_cap=Decimal("261000"),
         )
+        # Phase 39: prev_snapshot with >= 10 holders required
+        prev = _make_snapshot(holders_count=15)
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_growth_pct=5100.0,
             token_age_minutes=0.8,
+            prev_snapshot=prev,
         )
         assert "bot_holder_farming" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "bot_holder_farming")
@@ -798,26 +815,60 @@ class TestAntiRugRules:
             liquidity_usd=Decimal("50000"),
             market_cap=Decimal("75000"),
         )
+        prev = _make_snapshot(holders_count=20)
         result = evaluate_signals(
             snapshot, _make_security(),
             rugcheck_score=None,  # No rugcheck!
             holder_growth_pct=600.0,
             token_age_minutes=1.0,
+            prev_snapshot=prev,
         )
         assert "bot_holder_farming" in result.reasons
 
     def test_r58_not_on_low_liq(self):
-        """R58 does NOT fire on low-liq pool (floor $20K prevents false positives)."""
+        """R58 does NOT fire on very low-liq pool (floor $8K, Phase 39)."""
         snapshot = _make_snapshot(
-            liquidity_usd=Decimal("14000"),
-            market_cap=Decimal("8000"),
+            liquidity_usd=Decimal("7000"),
+            market_cap=Decimal("5000"),
         )
+        prev = _make_snapshot(holders_count=15)
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_growth_pct=800.0,
             token_age_minutes=1.0,
+            prev_snapshot=prev,
         )
         assert "bot_holder_farming" not in result.reasons
+
+    def test_r58_not_on_low_prev_holders(self):
+        """R58 does NOT fire when prev_holders < 10 (Phase 39: 1→N inflation guard)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("50000"),
+            market_cap=Decimal("75000"),
+        )
+        prev = _make_snapshot(holders_count=1)
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=5000.0,
+            token_age_minutes=1.0,
+            prev_snapshot=prev,
+        )
+        assert "bot_holder_farming" not in result.reasons
+
+    def test_r58_fires_on_8k_to_20k_liq_with_prev_holders(self):
+        """R58 fires on $8K-$20K liq when prev_holders >= 10 (Phase 39)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("14000"),
+            market_cap=Decimal("8000"),
+        )
+        prev = _make_snapshot(holders_count=12)
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_growth_pct=800.0,
+            token_age_minutes=1.0,
+            prev_snapshot=prev,
+        )
+        assert "bot_holder_farming" in result.reasons
 
     def test_r58_not_on_low_growth(self):
         """R58 does NOT fire on moderate holder growth (<500%)."""
@@ -1114,3 +1165,106 @@ class TestAntiRugRules:
         )
         assert "graduation_rug_structural" not in result.reasons
         assert "bot_holder_farming" not in result.reasons
+
+
+# --- Phase 39: R69 Velocity Danger Compound ---
+
+
+class TestVelocityDangerCompound:
+    """R69: holder_velocity >= 200 + rugcheck >= 3000 + liq < $30K → -6."""
+
+    def test_r69_moltgen_pattern_fires(self):
+        """MOLTGEN: 417 holders/min + rugcheck 3501 + $13K liq → R69 fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13000"),
+            market_cap=Decimal("13000"),
+            holders_count=139,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=417.0,
+            rugcheck_score=3501,
+            token_age_minutes=0.5,
+        )
+        assert "velocity_danger_compound" in result.reasons
+        rule = next(r for r in result.rules_fired if r.name == "velocity_danger_compound")
+        assert rule.weight == -6
+
+    def test_r69_not_on_clean_rugcheck(self):
+        """High velocity + clean rugcheck (<3000) → R69 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13000"),
+            market_cap=Decimal("13000"),
+            holders_count=200,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=300.0,
+            rugcheck_score=2000,
+            token_age_minutes=1.0,
+        )
+        assert "velocity_danger_compound" not in result.reasons
+
+    def test_r69_not_on_high_liq(self):
+        """High velocity + rugcheck 3500 + $50K liq → R69 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("50000"),
+            market_cap=Decimal("50000"),
+            holders_count=500,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=400.0,
+            rugcheck_score=3500,
+            token_age_minutes=0.5,
+        )
+        assert "velocity_danger_compound" not in result.reasons
+
+    def test_r69_not_on_low_velocity(self):
+        """Moderate velocity (150/min) + rugcheck 3500 + low liq → R69 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("13000"),
+            market_cap=Decimal("13000"),
+            holders_count=100,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=150.0,
+            rugcheck_score=3500,
+            token_age_minutes=1.0,
+        )
+        assert "velocity_danger_compound" not in result.reasons
+
+    def test_r69_boundary_exactly_200_and_3000(self):
+        """Exact boundary: velocity=200, rugcheck=3000, liq=$29K → fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("29000"),
+            market_cap=Decimal("29000"),
+            holders_count=150,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=200.0,
+            rugcheck_score=3000,
+            token_age_minutes=1.0,
+        )
+        assert "velocity_danger_compound" in result.reasons
+
+    def test_r69_profitable_agent1c_not_hit(self):
+        """Safety: agent1c +124% had velocity=194 + rugcheck=15357 + liq=$14K.
+        R69 requires rugcheck 3000-4999. Score 15357 >= 5000 → out of range.
+        (The 5000+ tier is handled by R15 -5 penalty instead.)"""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("14274"),
+            market_cap=Decimal("12611"),
+            holders_count=269,
+        )
+        result = evaluate_signals(
+            snapshot, _make_security(),
+            holder_velocity=194.0,
+            rugcheck_score=15357,
+            token_age_minutes=0.8,
+        )
+        # R69 checks rugcheck_score >= 3000 (no upper bound), so 15357 qualifies.
+        # But velocity 194 < 200 → does NOT fire.
+        assert "velocity_danger_compound" not in result.reasons

@@ -1109,6 +1109,53 @@ class TestPhase38CompoundCopycatGuard:
         )
         assert "copycat_serial_compound" not in result.reasons
 
+    # -- Phase 39: rugcheck_score 3000-4999 as compound flag --
+
+    def test_compound_rugcheck_score_3000_plus_lp_unsecured_copycat_avoid(self):
+        """MOLTGEN pattern: rugcheck_score 3501 + LP_unsecured + copycat → 3 flags → avoid."""
+        snapshot = _make_snapshot(holders_count=50)
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            raydium_lp_burned=False,
+            rugcheck_score=3501,
+            copycat_rugged=True,
+            copycat_rug_count=2,
+            token_age_minutes=1.5,
+        )
+        assert result.action == "avoid"
+        assert "compound_scam_fingerprint" in result.reasons
+
+    def test_compound_rugcheck_score_under_3000_no_flag(self):
+        """rugcheck_score 2500 does NOT add compound flag (only 3000+ does)."""
+        snapshot = _make_snapshot(holders_count=50)
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            raydium_lp_burned=False,
+            rugcheck_score=2500,  # Below 3000
+            copycat_rugged=True,
+            copycat_rug_count=2,
+            token_age_minutes=1.5,
+        )
+        # Only 2 flags: LP_unsecured + copycat < 3
+        assert "compound_scam_fingerprint" not in result.reasons
+
+    def test_compound_rugcheck_score_5000_no_flag(self):
+        """rugcheck_score 5000+ does NOT add compound flag (only 3000-4999)."""
+        snapshot = _make_snapshot(holders_count=50)
+        sec = _make_security(lp_burned=False, lp_locked=False)
+        result = evaluate_signals(
+            snapshot, sec,
+            raydium_lp_burned=False,
+            rugcheck_score=5500,  # Above 4999
+            copycat_rugged=True,
+            copycat_rug_count=2,
+            token_age_minutes=1.5,
+        )
+        # Only 2 flags: LP_unsecured + copycat < 3
+        assert "compound_scam_fingerprint" not in result.reasons
+
     # -- Guard 3: Fresh unsecured LP cap REMOVED after backtest --
     # PumpFun tokens ALWAYS have lp_burned=NULL, lp_locked=false.
     # Backtest showed 56.7% of profitable positions would be blocked.

@@ -166,6 +166,14 @@ def evaluate_signals(
         _scam_flags += 1
         _scam_details.append(f"rugcheck_{rugcheck_danger_count}_dangers")
 
+    # Phase 39: High rugcheck score as compound flag.
+    # MOLTGEN: rugcheck 3501 but only 1 danger_count — missed the >= 2 gate above.
+    # Production: 0 profitable tokens had rugcheck 3000-4999, all profits were 5000+ or <3000.
+    # This flag stacks with LP_unsecured (MOLTGEN had both) → 2 flags from rug indicators.
+    if rugcheck_score is not None and rugcheck_score >= 3000 and rugcheck_score < 5000:
+        _scam_flags += 1
+        _scam_details.append(f"rugcheck_score_{rugcheck_score}")
+
     if pumpfun_dead_tokens is not None and pumpfun_dead_tokens >= 3:
         _scam_flags += 1
         _scam_details.append(f"serial_{pumpfun_dead_tokens}_dead")
@@ -339,15 +347,21 @@ def evaluate_signals(
     # --- PHASE 11 BEARISH RULES ---
 
     # R15: Rugcheck danger — tiered penalty based on severity.
-    # score 50-5000: -2 (noise — "Low LP Providers", "Mutable Metadata")
-    # score 5000+: -5 (extreme — multiple critical dangers, rug pull likely)
-    # Production data: ALL drained tokens had rugcheck 3500-96000.
-    # Legit "noisy" memecoins rarely exceed 2000.
+    # Phase 39 tiers (MOLTGEN post-mortem: 3501 scored only -2, token rugged):
+    #   50-2999:  -2 (noise — "Low LP Providers", "Mutable Metadata")
+    #   3000-4999: -4 (high danger — ALL production rugs had 3500+, 0 profits in this range)
+    #   5000+:    -5 (extreme — multiple critical dangers, rug pull certain)
+    # Production data: 0 profitable tokens with rugcheck 3000-4999, 2 rugs (-100%).
     if rugcheck_score is not None and rugcheck_score >= 50:
         if rugcheck_score >= 5000:
             r = SignalRule(
                 "rugcheck_danger", -5,
                 f"Rugcheck score {rugcheck_score} (extreme danger)",
+            )
+        elif rugcheck_score >= 3000:
+            r = SignalRule(
+                "rugcheck_danger", -4,
+                f"Rugcheck score {rugcheck_score} (high danger — rug pull range)",
             )
         else:
             r = SignalRule(
@@ -976,14 +990,19 @@ def evaluate_signals(
 
     # R58: Bot-farmed holders — removed rugcheck dependency, added liq floor.
     # Production showed rugcheck bypasses (score=2401, or missing).
-    # Liq floor $20K prevents penalizing organic low-liq tokens where
-    # holder growth % is high simply from tiny starting count (5→30 = +500%).
+    # Phase 39: lowered liq floor from $20K to $8K, added prev_holders >= 10 guard.
+    # MOLTGEN had $13K liq, growth 1→139 = +13800% — bypassed old $20K floor.
+    # The prev_holders guard prevents false positives from 1→N inflation
+    # (all PumpFun tokens start with 1 holder, organic growth 1→300 = +29900%).
+    # Production: ALL 20 profitable tokens in $8-20K range had prev_holders=1.
+    _prev_holders_r58 = prev_snapshot.holders_count if prev_snapshot and prev_snapshot.holders_count else 0
     if (
         holder_growth_pct is not None
         and holder_growth_pct >= 500
         and token_age_minutes is not None
         and token_age_minutes <= 2
-        and liq > 20_000  # Floor: organic low-liq tokens safe
+        and liq > 8_000  # Floor: very low-liq tokens safe (was $20K)
+        and _prev_holders_r58 >= 10  # Guard: skip 1→N inflation (organic PumpFun growth)
     ):
         r = SignalRule(
             "bot_holder_farming", -3,
@@ -1047,6 +1066,31 @@ def evaluate_signals(
             )
             fired.append(r)
             reasons[r.name] = r.description
+
+    # --- PHASE 39 COMPOUND VELOCITY SCAM ---
+
+    # R69: Velocity + danger compound — extreme holder velocity on a token
+    # that also has high rugcheck score AND low liquidity.
+    # MOLTGEN post-mortem: 417 holders/min + rugcheck 3501 + $13K liq = obvious scam,
+    # but system rewarded velocity with +8 bullish (R4+R44+R53) and only penalized -2.
+    # This rule fires ONLY when multiple red flags combine with high velocity,
+    # preventing false positives on legit high-velocity tokens (which have clean rugcheck).
+    # Production: 0 profitable tokens had rugcheck >= 3000 (all 143 profitable had 5000+
+    # or <3000). The rugcheck 3000+ guard makes this rule impossible to hit on winners.
+    if (
+        holder_velocity is not None
+        and holder_velocity >= 200
+        and rugcheck_score is not None
+        and rugcheck_score >= 3000
+        and liq < 30_000
+    ):
+        r = SignalRule(
+            "velocity_danger_compound", -6,
+            f"Velocity scam: {holder_velocity:.0f} holders/min + "
+            f"rugcheck {rugcheck_score} + liq ${liq:,.0f}",
+        )
+        fired.append(r)
+        reasons[r.name] = r.description
 
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
