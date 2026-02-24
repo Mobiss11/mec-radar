@@ -23,6 +23,10 @@ def check_close_conditions(
     take_profit_x: float = 2.0,
     stop_loss_pct: float = -50.0,
     timeout_hours: int = 8,
+    trailing_activation_x: float = 1.3,
+    trailing_drawdown_pct: float = 15.0,
+    stagnation_timeout_min: float = 25.0,
+    stagnation_max_pnl_pct: float = 15.0,
     liquidity_usd: float | None = None,
     liquidity_grace_period_sec: int = 90,
     is_dead_price: bool = False,
@@ -33,10 +37,11 @@ def check_close_conditions(
     0. Liquidity removed → immediate close (can't sell, total loss)
     1. Rug detected → immediate close
     2. Stop loss: -50% from entry → close
-    3. Take profit: >= 2x from entry → close (capture gains before dump)
-    4. Trailing stop: after hitting 1.5x, close if price drops 20% from max
+    3. Take profit: >= take_profit_x from entry → close
+    4. Trailing stop: after trailing_activation_x, close on trailing_drawdown_pct drop
     5. Early stop: if < -20% after 30 minutes → close early (not recovering)
-    6. Timeout: hours max → close
+    6. Stagnation: if open > stagnation_timeout_min and PnL < stagnation_max_pnl_pct → close
+    7. Timeout: hours max → close
     """
     # Liquidity critically low — pool drained, can't sell without massive slippage
     if liquidity_usd is not None and liquidity_usd < 5_000:
@@ -83,14 +88,17 @@ def check_close_conditions(
         if multiplier >= take_profit_x:
             return "take_profit"
 
-        # Trailing stop: after 1.5x, protect gains — close if 20% drawdown from max
+        # Phase 31C: Trailing stop — configurable activation and drawdown.
+        # After price reaches trailing_activation_x, close if price drops
+        # trailing_drawdown_pct from max. Protects gains from scam rug pulls
+        # that pump to +30-47% before draining LP.
         if pos.max_price and pos.max_price > 0:
             max_mult = float(pos.max_price / pos.entry_price)
-            if max_mult >= 1.5:
+            if max_mult >= trailing_activation_x:
                 drawdown_from_max = float(
                     (pos.max_price - current_price) / pos.max_price * 100
                 )
-                if drawdown_from_max >= 20:
+                if drawdown_from_max >= trailing_drawdown_pct:
                     # Price gap: if actual PnL is worse than stop loss,
                     # report as stop_loss for accurate reason tracking
                     if pnl_pct <= stop_loss_pct:
@@ -106,6 +114,16 @@ def check_close_conditions(
             age = now - pos.opened_at
             if age <= timedelta(minutes=30) and pnl_pct <= -20:
                 return "early_stop"
+
+        # Phase 31B: Stagnation exit — close positions that go nowhere.
+        # Data shows: TP-positions at 25min have median PnL +33%, scam-positions +11%.
+        # If position is open > stagnation_timeout_min and PnL < stagnation_max_pnl_pct,
+        # it's likely a dead token or slow rug — close to free capital.
+        # Safety: 0 of 22 long TP-positions had PnL < 18% at 20min mark.
+        if pos.opened_at and stagnation_timeout_min > 0:
+            age_min = (now - pos.opened_at).total_seconds() / 60.0
+            if age_min >= stagnation_timeout_min and pnl_pct < stagnation_max_pnl_pct:
+                return "stagnation"
 
     # Timeout
     if pos.opened_at:

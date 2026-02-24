@@ -112,9 +112,9 @@ def test_close_take_profit_just_below_2x_no_close():
 # ── Trailing stop ──────────────────────────────────────────────────────
 
 
-def test_close_trailing_stop_after_1_5x_with_20pct_drawdown():
-    """After max hits 1.5x, a 20% drawdown from max triggers trailing_stop."""
-    # Entry: 1.00, Max: 1.60 (1.6x), Current: 1.28 (20% below max)
+def test_close_trailing_stop_after_1_3x_with_20pct_drawdown():
+    """After max hits 1.3x activation, a 20% drawdown from max triggers trailing_stop."""
+    # Entry: 1.00, Max: 1.60 (1.6x > 1.3x activation), Current: 1.28 (20% > 15% drawdown)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.60"),
@@ -153,27 +153,27 @@ def test_close_trailing_stop_extreme_loss_becomes_stop_loss():
     assert result == "stop_loss"
 
 
-def test_close_trailing_stop_not_triggered_below_1_5x_max():
-    """If max never reached 1.5x, trailing stop logic should not apply."""
+def test_close_trailing_stop_not_triggered_below_activation_max():
+    """If max never reached trailing_activation_x (1.3x default), trailing stop should not apply."""
     pos = _make_position(
         entry_price=Decimal("1.00"),
-        max_price=Decimal("1.40"),  # only 1.4x
+        max_price=Decimal("1.25"),  # only 1.25x, below 1.3x activation
     )
-    current = Decimal("1.10")  # 21% drawdown from max, but max < 1.5x
+    current = Decimal("1.00")  # 20% drawdown from max, but max < 1.3x
     result = check_close_conditions(
         pos, current, is_rug=False, now=datetime.now(UTC)
     )
-    # Should not be trailing_stop (1.4x < 1.5x threshold)
+    # Should not be trailing_stop (1.25x < 1.3x threshold)
     assert result is None
 
 
 def test_close_trailing_stop_not_triggered_small_drawdown():
-    """19% drawdown from max after 1.5x should NOT trigger trailing_stop."""
+    """14% drawdown from max after 1.3x should NOT trigger trailing_stop (threshold is 15%)."""
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("2.00"),  # 2x
     )
-    current = Decimal("1.62")  # (2.00 - 1.62) / 2.00 = 19% drawdown
+    current = Decimal("1.72")  # (2.00 - 1.72) / 2.00 = 14% drawdown, below 15%
     result = check_close_conditions(
         pos, current, is_rug=False, now=datetime.now(UTC)
     )
@@ -216,7 +216,9 @@ def test_close_stop_loss_custom_threshold():
 
 
 def test_close_stop_loss_not_triggered_at_minus_49pct():
-    """-49% should NOT trigger stop_loss (threshold is -50%)."""
+    """-49% should NOT trigger stop_loss (threshold is -50%).
+    But Phase 31B stagnation fires: age=1h > 25min, PnL=-49% < 15%.
+    """
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -226,7 +228,8 @@ def test_close_stop_loss_not_triggered_at_minus_49pct():
     result = check_close_conditions(
         pos, Decimal("0.51"), is_rug=False, now=now
     )
-    assert result is None
+    # Phase 31B: 1h > 25min AND -49% < 15% → stagnation
+    assert result == "stagnation"
 
 
 # ── Early stop ─────────────────────────────────────────────────────────
@@ -261,7 +264,9 @@ def test_close_early_stop_minus_25pct_within_30min():
 
 
 def test_close_early_stop_not_triggered_after_30min():
-    """At -20% but 31 minutes old — early_stop should NOT apply."""
+    """At -20% but 31 minutes old — early_stop should NOT apply.
+    Note: stagnation (Phase 31B) fires instead since age>25min and PnL<15%.
+    """
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -271,7 +276,8 @@ def test_close_early_stop_not_triggered_after_30min():
     result = check_close_conditions(
         pos, Decimal("0.80"), is_rug=False, now=now
     )
-    assert result is None
+    # Phase 31B: 31min > 25min stagnation timeout AND -20% < 15% max PnL → stagnation
+    assert result == "stagnation"
 
 
 def test_close_early_stop_not_triggered_small_loss():
@@ -288,11 +294,223 @@ def test_close_early_stop_not_triggered_small_loss():
     assert result is None
 
 
+# ── Stagnation exit (Phase 31B) ────────────────────────────────────────
+
+
+def test_close_stagnation_after_25min_low_pnl():
+    """Position open >25min with PnL <15% → stagnation close."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.10"),
+        opened_at=now - timedelta(minutes=26),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.10"), is_rug=False, now=now
+    )
+    assert result == "stagnation"
+
+
+def test_close_stagnation_negative_pnl():
+    """Position open >25min with negative PnL → stagnation close."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.05"),
+        opened_at=now - timedelta(minutes=30),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.95"), is_rug=False, now=now
+    )
+    assert result == "stagnation"
+
+
+def test_no_stagnation_before_25min():
+    """Position at 24min with low PnL → NOT stagnation (too young)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.05"),
+        opened_at=now - timedelta(minutes=24),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.05"), is_rug=False, now=now
+    )
+    assert result is None
+
+
+def test_no_stagnation_high_pnl():
+    """Position open >25min but PnL ≥15% → NOT stagnation (doing well)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.20"),
+        opened_at=now - timedelta(minutes=30),
+    )
+    # PnL = +20% → above 15% threshold → no stagnation
+    result = check_close_conditions(
+        pos, Decimal("1.20"), is_rug=False, now=now
+    )
+    assert result is None
+
+
+def test_close_stagnation_exactly_25min():
+    """Position at exactly 25min with low PnL → stagnation."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.10"),
+        opened_at=now - timedelta(minutes=25),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.10"), is_rug=False, now=now
+    )
+    assert result == "stagnation"
+
+
+def test_close_stagnation_custom_params():
+    """Custom stagnation_timeout_min=10 and stagnation_max_pnl_pct=5."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.04"),
+        opened_at=now - timedelta(minutes=11),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.04"), is_rug=False, now=now,
+        stagnation_timeout_min=10.0,
+        stagnation_max_pnl_pct=5.0,
+    )
+    assert result == "stagnation"
+
+
+def test_no_stagnation_when_disabled():
+    """Stagnation disabled (timeout=0) → no stagnation close."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.05"),
+        opened_at=now - timedelta(hours=2),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.05"), is_rug=False, now=now,
+        stagnation_timeout_min=0,
+    )
+    # Should not close for stagnation (disabled); 2h < 8h timeout
+    assert result is None
+
+
+def test_stagnation_does_not_override_stop_loss():
+    """Stop loss (-50%) fires before stagnation check."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(minutes=30),
+    )
+    result = check_close_conditions(
+        pos, Decimal("0.50"), is_rug=False, now=now
+    )
+    assert result == "stop_loss"
+
+
+def test_stagnation_profitable_position_borderline():
+    """Position at exactly 15% PnL and >25min → NOT stagnation (< threshold, not ≤)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.15"),
+        opened_at=now - timedelta(minutes=30),
+    )
+    # PnL = exactly +15% → not < 15% → no stagnation
+    result = check_close_conditions(
+        pos, Decimal("1.15"), is_rug=False, now=now
+    )
+    assert result is None
+
+
+# ── Trailing stop with custom params (Phase 31C) ─────────────────────
+
+
+def test_trailing_stop_custom_activation_1_5x():
+    """Custom trailing_activation_x=1.5 → max at 1.4x should NOT trigger."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.40"),
+    )
+    current = Decimal("1.10")  # 21% drawdown from max, but max < 1.5x
+    result = check_close_conditions(
+        pos, current, is_rug=False, now=datetime.now(UTC),
+        trailing_activation_x=1.5,
+        trailing_drawdown_pct=20.0,
+    )
+    assert result is None
+
+
+def test_trailing_stop_custom_activation_1_5x_triggers():
+    """Custom trailing_activation_x=1.5 → max at 1.6x + 20% drawdown triggers."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.60"),
+    )
+    current = Decimal("1.28")  # 20% drawdown from 1.60
+    result = check_close_conditions(
+        pos, current, is_rug=False, now=datetime.now(UTC),
+        trailing_activation_x=1.5,
+        trailing_drawdown_pct=20.0,
+    )
+    assert result == "trailing_stop"
+
+
+def test_trailing_stop_at_1_3x_activation_15pct_drawdown():
+    """Default Phase 31C params: 1.3x activation, 15% drawdown."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.40"),  # 1.4x > 1.3x activation
+    )
+    current = Decimal("1.19")  # (1.40 - 1.19) / 1.40 = 15% drawdown
+    result = check_close_conditions(
+        pos, current, is_rug=False, now=datetime.now(UTC)
+    )
+    assert result == "trailing_stop"
+
+
+def test_trailing_stop_at_1_3x_activation_14pct_no_trigger():
+    """14% drawdown after 1.3x activation → NOT trailing_stop."""
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.40"),  # 1.4x > 1.3x activation
+    )
+    current = Decimal("1.21")  # (1.40 - 1.21) / 1.40 = 13.6% drawdown
+    result = check_close_conditions(
+        pos, current, is_rug=False, now=datetime.now(UTC)
+    )
+    assert result is None
+
+
 # ── Timeout ────────────────────────────────────────────────────────────
 
 
 def test_close_timeout_after_8_hours():
-    """Position should close after 8 hours (default timeout)."""
+    """Position should close after 8 hours (default timeout).
+    With stagnation disabled, timeout fires for old positions with 0% PnL.
+    """
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.00"),
+        opened_at=now - timedelta(hours=8, minutes=1),
+    )
+    # Disable stagnation to test pure timeout
+    result = check_close_conditions(
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        stagnation_timeout_min=0,
+    )
+    assert result == "timeout"
+
+
+def test_close_timeout_with_stagnation_fires_stagnation_first():
+    """8h position with 0% PnL and stagnation enabled → stagnation (before timeout)."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
@@ -302,6 +520,22 @@ def test_close_timeout_after_8_hours():
     result = check_close_conditions(
         pos, Decimal("1.00"), is_rug=False, now=now
     )
+    # Stagnation fires first: 8h > 25min AND 0% < 15%
+    assert result == "stagnation"
+
+
+def test_close_timeout_high_pnl_position():
+    """8h position with PnL ≥15% → timeout (stagnation doesn't apply)."""
+    now = datetime.now(UTC)
+    pos = _make_position(
+        entry_price=Decimal("1.00"),
+        max_price=Decimal("1.20"),
+        opened_at=now - timedelta(hours=8, minutes=1),
+    )
+    result = check_close_conditions(
+        pos, Decimal("1.20"), is_rug=False, now=now
+    )
+    # PnL=+20% >= 15% → no stagnation → timeout
     assert result == "timeout"
 
 
@@ -313,22 +547,25 @@ def test_close_timeout_custom_hours():
         max_price=Decimal("1.00"),
         opened_at=now - timedelta(hours=4, minutes=1),
     )
+    # Disable stagnation to test pure timeout
     result = check_close_conditions(
-        pos, Decimal("1.00"), is_rug=False, now=now, timeout_hours=4
+        pos, Decimal("1.00"), is_rug=False, now=now,
+        timeout_hours=4, stagnation_timeout_min=0,
     )
     assert result == "timeout"
 
 
 def test_close_timeout_not_reached():
-    """Position within timeout window should NOT close."""
+    """Position within timeout window and above stagnation PnL → no close."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
-        max_price=Decimal("1.00"),
+        max_price=Decimal("1.20"),
         opened_at=now - timedelta(hours=7),
     )
+    # PnL=+20% >= 15% → no stagnation; 7h < 8h → no timeout
     result = check_close_conditions(
-        pos, Decimal("1.00"), is_rug=False, now=now
+        pos, Decimal("1.20"), is_rug=False, now=now
     )
     assert result is None
 
@@ -337,12 +574,12 @@ def test_close_timeout_not_reached():
 
 
 def test_no_close_normal_price():
-    """Normal price movement should return None."""
+    """Normal price movement within first 20 min should return None."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.20"),
-        opened_at=now - timedelta(hours=1),
+        opened_at=now - timedelta(minutes=20),
     )
     result = check_close_conditions(
         pos, Decimal("1.10"), is_rug=False, now=now
@@ -451,12 +688,14 @@ def test_close_liq_low_price_crashed():
 
 
 def test_skip_liq_removed_when_price_healthy():
-    """Phase 37: Zero liq but price at entry → skip (bad data, not rug)."""
+    """Phase 37: Zero liq but price at entry → skip liq_removed (bad data, not rug).
+    Uses young position (<25min) to avoid stagnation triggering.
+    """
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),
-        opened_at=now - timedelta(hours=1),
+        opened_at=now - timedelta(minutes=10),
     )
     result = check_close_conditions(
         pos, Decimal("1.00"), is_rug=False, now=now,
@@ -468,17 +707,17 @@ def test_skip_liq_removed_when_price_healthy():
 
 def test_skip_liq_removed_when_price_above_50pct():
     """Phase 37: Near-zero liq but price at 60% of entry → skip liq_removed.
-    Note: Other conditions may still fire (early_stop, etc.)
-    so we use max_price=entry to avoid trailing_stop."""
+    Disables stagnation to isolate the price-coherence test."""
     now = datetime.now(UTC)
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),  # no trailing stop
-        opened_at=now - timedelta(hours=1),  # past early-stop
+        opened_at=now - timedelta(hours=1),  # past early-stop window
     )
     result = check_close_conditions(
         pos, Decimal("0.60"), is_rug=False, now=now,
         liquidity_usd=50.0,
+        stagnation_timeout_min=0,  # disable stagnation for this test
     )
     # Price healthy (60% >= 50%) → skip liq_removed
     # -40% loss doesn't hit stop_loss (-50%) or early_stop (>30min)
@@ -537,7 +776,7 @@ def test_close_liquidity_none_does_not_trigger():
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),
-        opened_at=datetime.now(UTC) - timedelta(hours=1),
+        opened_at=datetime.now(UTC) - timedelta(minutes=10),
     )
     result = check_close_conditions(
         pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
@@ -551,7 +790,7 @@ def test_close_liquidity_above_threshold_no_close():
     pos = _make_position(
         entry_price=Decimal("1.00"),
         max_price=Decimal("1.00"),
-        opened_at=datetime.now(UTC) - timedelta(hours=1),
+        opened_at=datetime.now(UTC) - timedelta(minutes=10),
     )
     result = check_close_conditions(
         pos, Decimal("1.00"), is_rug=False, now=datetime.now(UTC),
@@ -692,6 +931,7 @@ def test_phase37_exactly_50pct_price_is_healthy():
 
     Price-coherence guard skips liq_removed, but -50% PnL hits stop_loss.
     Use 0.51 to stay above stop_loss threshold and prove liq check is skipped.
+    Disables stagnation to isolate the price-coherence test.
     """
     now = datetime.now(UTC)
     pos = _make_position(
@@ -702,6 +942,7 @@ def test_phase37_exactly_50pct_price_is_healthy():
     result = check_close_conditions(
         pos, Decimal("0.51"), is_rug=False, now=now,
         liquidity_usd=0.0,
+        stagnation_timeout_min=0,  # disable stagnation for this test
     )
     # 0.51 >= 1.00 * 0.5 → price_healthy → skip liq_removed
     # pnl=-49% → doesn't hit stop_loss (-50%)

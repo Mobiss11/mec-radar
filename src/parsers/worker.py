@@ -596,6 +596,10 @@ async def run_parser() -> None:
             take_profit_x=settings.paper_take_profit_x,
             stop_loss_pct=settings.paper_stop_loss_pct,
             timeout_hours=settings.paper_timeout_hours,
+            trailing_activation_x=settings.paper_trailing_activation_x,
+            trailing_drawdown_pct=settings.paper_trailing_drawdown_pct,
+            stagnation_timeout_min=settings.paper_stagnation_timeout_min,
+            stagnation_max_pnl_pct=settings.paper_stagnation_max_pnl_pct,
             alert_dispatcher=alert_dispatcher,
         )
         logger.info("Paper trading engine enabled")
@@ -641,6 +645,10 @@ async def run_parser() -> None:
                     take_profit_x=settings.real_take_profit_x,
                     stop_loss_pct=settings.real_stop_loss_pct,
                     timeout_hours=settings.real_timeout_hours,
+                    trailing_activation_x=settings.real_trailing_activation_x,
+                    trailing_drawdown_pct=settings.real_trailing_drawdown_pct,
+                    stagnation_timeout_min=settings.real_stagnation_timeout_min,
+                    stagnation_max_pnl_pct=settings.real_stagnation_max_pnl_pct,
                     alert_dispatcher=alert_dispatcher,
                 )
                 logger.info(f"[REAL] Real trading enabled. Wallet: {wallet.pubkey_str}")
@@ -3129,10 +3137,12 @@ async def _enrich_token(
                         f"delta={score - score_v3:+d} stage={task.stage.name}"
                     )
 
-        # 15. Generate entry signal (INITIAL + MIN_2 + MIN_5 for early detection)
-        # MIN_2 catches fast movers missed at INITIAL (score=0 → score=49 in 2min)
-        # MIN_5 gives a third chance with more complete data.
-        _signal_stages = {EnrichmentStage.INITIAL, EnrichmentStage.MIN_2, EnrichmentStage.MIN_5}
+        # 15. Generate entry signal (INITIAL + MIN_2 for fast entry)
+        # Phase 31A: Removed MIN_5 — analysis shows PROFIT tokens enter at T+26s median,
+        # while MIN_5 entries (T+300s) have 60% win rate vs 74% for 0-30s.
+        # Entering late means worse prices (+83% above discovery vs +24% for profits).
+        # MIN_2 still catches fast movers missed at INITIAL (score=0 → score=49 in 2min).
+        _signal_stages = {EnrichmentStage.INITIAL, EnrichmentStage.MIN_2}
         if (
             snapshot is not None
             and score is not None

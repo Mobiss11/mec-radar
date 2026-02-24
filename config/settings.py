@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     paper_take_profit_x: float = 1.5  # Phase 35: was 2.0, reduced to capture gains before instant rugs
     paper_stop_loss_pct: float = -50.0
     paper_timeout_hours: int = 8
+    paper_trailing_activation_x: float = 1.3  # Phase 31C: trailing stop activates at 1.3x (was hardcoded 1.5x)
+    paper_trailing_drawdown_pct: float = 15.0  # Phase 31C: close on 15% drop from max (was 20%)
+    paper_stagnation_timeout_min: float = 25.0  # Phase 31B: close stagnating positions after 25 min
+    paper_stagnation_max_pnl_pct: float = 15.0  # Phase 31B: only close if PnL < 15%
     liquidity_grace_period_sec: int = 90  # Phase 36: grace period for zero-liq fresh positions (DexScreener lag)
 
     # Real trading (DISABLED by default — requires wallet_private_key)
@@ -120,6 +124,10 @@ class Settings(BaseSettings):
     real_take_profit_x: float = 2.0
     real_stop_loss_pct: float = -50.0
     real_timeout_hours: int = 8
+    real_trailing_activation_x: float = 1.3  # Phase 31C: trailing stop activates at 1.3x
+    real_trailing_drawdown_pct: float = 15.0  # Phase 31C: close on 15% drop from max
+    real_stagnation_timeout_min: float = 25.0  # Phase 31B: close stagnating positions after 25 min
+    real_stagnation_max_pnl_pct: float = 15.0  # Phase 31B: only close if PnL < 15%
     real_slippage_bps: int = 500  # 5%
     real_min_liquidity_usd: float = 5000.0
     real_priority_fee_lamports: int = 100000  # 0.0001 SOL

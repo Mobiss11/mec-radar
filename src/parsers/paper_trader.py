@@ -35,6 +35,10 @@ class PaperTrader:
         take_profit_x: float = 2.0,
         stop_loss_pct: float = -50.0,
         timeout_hours: int = 4,
+        trailing_activation_x: float = 1.3,
+        trailing_drawdown_pct: float = 15.0,
+        stagnation_timeout_min: float = 25.0,
+        stagnation_max_pnl_pct: float = 15.0,
         alert_dispatcher: AlertDispatcher | None = None,
     ) -> None:
         self._sol_per_trade = Decimal(str(sol_per_trade))
@@ -42,6 +46,10 @@ class PaperTrader:
         self._take_profit_x = take_profit_x
         self._stop_loss_pct = stop_loss_pct
         self._timeout_hours = timeout_hours
+        self._trailing_activation_x = trailing_activation_x
+        self._trailing_drawdown_pct = trailing_drawdown_pct
+        self._stagnation_timeout_min = stagnation_timeout_min
+        self._stagnation_max_pnl_pct = stagnation_max_pnl_pct
         self._alerts = alert_dispatcher
 
     async def on_signal(
@@ -265,6 +273,10 @@ class PaperTrader:
             take_profit_x=self._take_profit_x,
             stop_loss_pct=self._stop_loss_pct,
             timeout_hours=self._timeout_hours,
+            trailing_activation_x=self._trailing_activation_x,
+            trailing_drawdown_pct=self._trailing_drawdown_pct,
+            stagnation_timeout_min=self._stagnation_timeout_min,
+            stagnation_max_pnl_pct=self._stagnation_max_pnl_pct,
             liquidity_usd=liquidity_usd,
             is_dead_price=is_dead_price,
         )
