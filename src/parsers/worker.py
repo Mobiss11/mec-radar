@@ -521,11 +521,13 @@ async def run_parser() -> None:
     pumpportal.on_migration = on_migration
     pumpportal.on_trade = on_trade
 
-    # Phase 15: gRPC uses same handlers as PumpPortal (same models)
-    if grpc_client:
-        grpc_client.on_new_token = on_new_token
-        grpc_client.on_migration = on_migration
-        grpc_client.on_trade = on_trade
+    # Phase 15: gRPC discovery DISABLED — GMGN is primary source.
+    # gRPC now used ONLY for RugGuard (Raydium LP removal detection).
+    # Pump.fun discovery via gRPC was burning resources with 0 usable tokens.
+    # if grpc_client:
+    #     grpc_client.on_new_token = on_new_token
+    #     grpc_client.on_migration = on_migration
+    #     grpc_client.on_trade = on_trade
 
     # Meteora DBC setup
     rpc_url = settings.helius_rpc_url or settings.solana_rpc_url
@@ -735,10 +737,10 @@ async def run_parser() -> None:
     # Build task list based on feature flags
     tasks: list[asyncio.Task] = []
 
-    # Phase 15: gRPC is primary, PumpPortal is fallback
+    # gRPC: RugGuard-only mode (no pump.fun discovery — GMGN is primary)
     if grpc_client:
         tasks.append(asyncio.create_task(grpc_client.connect(), name="grpc_streaming"))
-        logger.info("Chainstack gRPC streaming enabled (primary)")
+        logger.info("Chainstack gRPC streaming enabled (RugGuard LP monitor only)")
 
     if settings.enable_pumpportal:
         tasks.append(asyncio.create_task(pumpportal.connect(), name="pumpportal_ws"))

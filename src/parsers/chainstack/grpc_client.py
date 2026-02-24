@@ -115,7 +115,9 @@ class ChainstackGrpcClient:
 
                 request = self._build_subscribe_request()
                 self._state = ConnectionState.ACTIVE
-                _filters = ["pump.fun"]
+                _filters = []
+                if self._has_pump_discovery:
+                    _filters.append("pump.fun")
                 if self.on_lp_removal:
                     _filters.append("raydium_amm")
                 logger.info(f"[GRPC] Subscribed to {'+'.join(_filters)} transactions (PROCESSED)")
@@ -184,14 +186,26 @@ class ChainstackGrpcClient:
         ]
         return grpc.aio.secure_channel(self._endpoint, creds, options=options)
 
+    @property
+    def _has_pump_discovery(self) -> bool:
+        """True if any pump.fun discovery callback is set."""
+        return bool(self.on_new_token or self.on_migration or self.on_trade)
+
     def _build_subscribe_request(self) -> geyser_pb2.SubscribeRequest:
-        """Build subscription for pump.fun + Raydium AMM transactions."""
+        """Build subscription for active filters only.
+
+        pump.fun filter is only added when discovery callbacks are set.
+        Raydium AMM filter is only added when on_lp_removal is set (RugGuard).
+        At least one filter must be present.
+        """
         request = geyser_pb2.SubscribeRequest()
 
         # Filter 1: pump.fun transactions (token discovery, trades, migrations)
-        tx_filter = request.transactions["pump_txs"]
-        tx_filter.account_include.append(PUMP_PROGRAM_ID)
-        tx_filter.failed = False
+        # Only added if discovery callbacks are registered
+        if self._has_pump_discovery:
+            tx_filter = request.transactions["pump_txs"]
+            tx_filter.account_include.append(PUMP_PROGRAM_ID)
+            tx_filter.failed = False
 
         # Filter 2: Raydium AMM transactions (LP removal detection for RugGuard)
         # Only added if on_lp_removal callback is set to avoid unnecessary traffic
