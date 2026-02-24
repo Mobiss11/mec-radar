@@ -332,26 +332,15 @@ def evaluate_signals(
             fired.append(r)
             reasons[r.name] = r.description
 
-    # R12: High concentration — soft informational penalty.
-    # Phase 45 fix: snapshot.top10_holders_pct is ALWAYS NULL (never populated
-    # by enrichment pipeline). Fallback to security.top10_holders_pct (GMGN/GoPlus).
-    # Production data: 63 positions — 0 had snapshot top10 data, 42 had security data.
-    # Phase 45b recalibration: on PumpFun, top10 >= 95% is the NORM (bonding curve
-    # concentrates holdings). 23 of 23 take_profit had top10 >= 95%. Tiered -4/-3/-2
-    # was catastrophic (blocked 72% of profitable positions). Reverted to soft -1
-    # only for truly extreme concentration (100%), informational only.
+    # R12: High concentration
+    # NOTE: snapshot.top10_holders_pct is always NULL for PumpFun tokens (not populated
+    # by enrichment). security.top10_holders_pct has data but on PumpFun top10 >= 95%
+    # is the NORM (bonding curve). Phase 45 backtest showed any penalty here blocks
+    # 72% of profitable positions. Kept as snapshot-only (effectively dormant until
+    # enrichment populates the field with post-migration holder data).
     top10 = snapshot.top10_holders_pct
-    if not isinstance(top10, (Decimal, int, float)):
-        top10 = None
-    if (top10 is None or top10 == 0) and security and security.top10_holders_pct is not None:
-        top10 = security.top10_holders_pct
-        if not isinstance(top10, (Decimal, int, float)):
-            top10 = None
-        elif isinstance(top10, Decimal) and top10 <= Decimal("1"):
-            # security stores as 0.0-1.0, convert to 0-100
-            top10 = top10 * Decimal("100")
     if top10 is not None and top10 > Decimal("50"):
-        r = SignalRule("high_concentration", -1, f"Top 10 hold {float(top10):.0f}%")
+        r = SignalRule("high_concentration", -2, f"Top 10 hold {float(top10):.0f}%")
         fired.append(r)
         reasons[r.name] = r.description
 

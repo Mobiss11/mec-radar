@@ -1881,88 +1881,31 @@ class TestLowLiqBotWash:
         assert wash_rules[0].weight == -5
 
 
-class TestR12SecurityFallback:
-    """R12: High concentration — fallback to security.top10_holders_pct when snapshot is NULL.
+class TestR12HighConcentration:
+    """R12: High concentration — uses snapshot.top10_holders_pct only.
 
-    Phase 45 fix: snapshot.top10_holders_pct is ALWAYS NULL across all 63 production
-    positions. R12 was dead code. Now falls back to security.top10_holders_pct.
-    Phase 45b: soft -1 only (PumpFun top10 >= 95% is normal, tiered was destructive).
+    Phase 45 postmortem: security fallback activated R12 on 72% of profitable
+    positions (PumpFun top10 >= 95% is the norm). Reverted to snapshot-only,
+    which is effectively dormant (enrichment doesn't populate this field).
     """
 
-    def test_r12_fires_from_security_when_snapshot_null(self):
-        """Snapshot top10 is None, security has 100% → R12 fires with -1."""
+    def test_r12_fires_when_snapshot_has_data(self):
+        """Snapshot top10 = 60% → R12 fires with -2."""
+        snapshot = _make_snapshot(top10_holders_pct=Decimal("60"))
+        result = evaluate_signals(snapshot, None, rugcheck_score=200)
+        assert "high_concentration" in result.reasons
+        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
+        assert rule.weight == -2
+
+    def test_r12_no_fire_when_snapshot_null(self):
+        """Snapshot top10 is None → no penalty (even if security has data)."""
         snapshot = _make_snapshot(top10_holders_pct=None)
         security = _make_security(top10_holders_pct=Decimal("1.0"))
         result = evaluate_signals(snapshot, security, rugcheck_score=200)
-        assert "high_concentration" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -1
-
-    def test_r12_fires_from_security_when_snapshot_zero(self):
-        """Snapshot top10 = 0 (no data), security = 0.95 → R12 fires."""
-        snapshot = _make_snapshot(top10_holders_pct=Decimal("0"))
-        security = _make_security(top10_holders_pct=Decimal("0.95"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=200)
-        assert "high_concentration" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -1
-
-    def test_r12_fires_on_70_pct(self):
-        """Security top10 = 70% → R12 fires with -1."""
-        snapshot = _make_snapshot(top10_holders_pct=None)
-        security = _make_security(top10_holders_pct=Decimal("0.70"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=200)
-        assert "high_concentration" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -1
+        assert "high_concentration" not in result.reasons
 
     def test_r12_no_fire_below_50_pct(self):
-        """Security top10 = 40% → below threshold, no penalty."""
-        snapshot = _make_snapshot(top10_holders_pct=None)
-        security = _make_security(top10_holders_pct=Decimal("0.40"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=200)
-        assert "high_concentration" not in result.reasons
-
-    def test_r12_prefers_snapshot_over_security(self):
-        """When snapshot HAS data, use it (not security fallback)."""
-        snapshot = _make_snapshot(top10_holders_pct=Decimal("60"))
-        security = _make_security(top10_holders_pct=Decimal("0.95"))
-        result = evaluate_signals(snapshot, security, rugcheck_score=200)
-        assert "high_concentration" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -1
-
-    def test_r12_no_fire_without_security(self):
-        """Snapshot NULL + no security → no penalty."""
-        snapshot = _make_snapshot(top10_holders_pct=None)
+        """Snapshot top10 = 40% → below threshold, no penalty."""
+        snapshot = _make_snapshot(top10_holders_pct=Decimal("40"))
         result = evaluate_signals(snapshot, None, rugcheck_score=200)
         assert "high_concentration" not in result.reasons
-
-    def test_r12_ket_soft_penalty(self):
-        """Real ket token: snapshot top10=NULL, security top10=1.0 (100%).
-        Phase 45b: soft -1 only — ket is indistinguishable from profitable tokens
-        by top10 alone (MOOLT +239%, MEMESAI +50% also had 100%)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22866"),
-            market_cap=Decimal("16461"),
-            holders_count=86,
-            volume_1h=Decimal("11816"),
-            volume_5m=Decimal("11816"),
-            buys_5m=87,
-            sells_5m=23,
-            buys_1h=87,
-            sells_1h=23,
-            score=56,
-            top10_holders_pct=None,
-        )
-        security = _make_security(top10_holders_pct=Decimal("1.0"))
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=11500,
-            holder_velocity=184.0,
-            token_age_minutes=0.5,
-            holder_growth_pct=153.0,
-        )
-        assert "high_concentration" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "high_concentration")
-        assert rule.weight == -1
