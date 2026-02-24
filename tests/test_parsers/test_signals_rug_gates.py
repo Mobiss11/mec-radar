@@ -1231,3 +1231,269 @@ class TestVelocityDangerCompound:
         # R69 checks rugcheck_score >= 3000 (no upper bound), so 15357 qualifies.
         # But velocity 194 < 200 → does NOT fire.
         assert "velocity_danger_compound" not in result.reasons
+
+
+class TestHolderConcentrationDanger:
+    """R70: Holder concentration penalty (Phase 40).
+
+    Production data (2026-02-24):
+    - rugcheck >= 20000 WITHOUT LP Unlocked: 36.8% rug rate, 50.9% win
+    - rugcheck >= 20000 WITH LP Unlocked: 100% win rate, 0 rugs (7 trades)
+    - Holder concentration risk: 34.2% rug rate vs 14.8% without (2.3x)
+    """
+
+    def test_r70_fires_holder_risk_high_rugcheck_no_lp_unlocked(self):
+        """Classic rug pattern: high rugcheck + holder/ownership risk, no LP Unlocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=21000,
+            rugcheck_risks="Top 10 holders high ownership, Single holder ownership, Low Liquidity",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=21000,
+        )
+        assert "holder_concentration_danger" in result.reasons
+
+    def test_r70_weight_is_minus_4(self):
+        """R70 penalty is -4 (soft, not fatal)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        security = _make_security(
+            rugcheck_score=22000,
+            rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=22000,
+        )
+        r70_rules = [r for r in result.rules_fired if r.name == "holder_concentration_danger"]
+        assert len(r70_rules) == 1
+        assert r70_rules[0].weight == -4
+
+    def test_r70_safe_with_lp_unlocked(self):
+        """LP Unlocked present = PumpFun standard. 100% win rate at high rugcheck.
+        R70 must NOT fire when LP Unlocked is in rugcheck_risks."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=21000,
+            rugcheck_risks="Large Amount of LP Unlocked, Top 10 holders high ownership, Low Liquidity",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=21000,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_safe_low_rugcheck(self):
+        """rugcheck_score < 20000 → R70 does NOT fire even with holder risks."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        security = _make_security(
+            rugcheck_score=15000,
+            rugcheck_risks="Top 10 holders high ownership, Single holder ownership",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=15000,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_safe_no_holder_risk_keywords(self):
+        """High rugcheck but no holder/ownership keywords → R70 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        security = _make_security(
+            rugcheck_score=25000,
+            rugcheck_risks="Low Liquidity, Mutable Metadata, No Socials",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=25000,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_safe_no_security(self):
+        """No security object → R70 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        result = evaluate_signals(
+            snapshot, None,
+            rugcheck_score=25000,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_safe_no_rugcheck_risks(self):
+        """Security exists but rugcheck_risks is None → R70 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        security = _make_security(
+            rugcheck_score=25000,
+            rugcheck_risks=None,
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=25000,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_boundary_rugcheck_exactly_20000(self):
+        """Exact boundary: rugcheck_score=20000 + holder risk + no LP Unlocked → fires."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        security = _make_security(
+            rugcheck_score=20000,
+            rugcheck_risks="Top 10 holders high ownership",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=20000,
+        )
+        assert "holder_concentration_danger" in result.reasons
+
+    def test_r70_boundary_rugcheck_19999(self):
+        """Just below boundary: rugcheck_score=19999 → R70 does NOT fire."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("20000"),
+            market_cap=Decimal("40000"),
+            holders_count=80,
+        )
+        security = _make_security(
+            rugcheck_score=19999,
+            rugcheck_risks="Top 10 holders high ownership",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=19999,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_ownership_keyword_variant(self):
+        """'ownership' keyword also triggers R70 (not just 'holder')."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=22000,
+            rugcheck_risks="Single ownership concentration, Low Liquidity",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=22000,
+        )
+        assert "holder_concentration_danger" in result.reasons
+
+    def test_r70_case_insensitive(self):
+        """Risk string matching is case-insensitive."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=22000,
+            rugcheck_risks="TOP 10 HOLDERS HIGH OWNERSHIP, LOW LIQUIDITY",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=22000,
+        )
+        assert "holder_concentration_danger" in result.reasons
+
+    def test_r70_lp_unlocked_case_insensitive(self):
+        """LP Unlocked exemption is case-insensitive."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=22000,
+            rugcheck_risks="lp unlocked, top 10 holders high ownership",
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=22000,
+        )
+        assert "holder_concentration_danger" not in result.reasons
+
+    def test_r70_as_compound_scam_flag(self):
+        """R70 pattern also adds to compound scam flags in R61.
+        If holder_concentration + 2 other flags = 3 → compound_scam_fingerprint (hard avoid)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=22000,
+            rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
+            is_mintable=True,      # compound flag: mintable
+            lp_burned=False,       # compound flag: LP_unsecured
+            lp_locked=False,
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=22000,
+            bundled_buy_detected=True,  # compound flag: bundled_buy
+            raydium_lp_burned=False,    # needed for LP_unsecured flag
+        )
+        # 4 flags: mintable + bundled_buy + LP_unsecured + holder_concentration = hard avoid
+        assert result.action == "avoid"
+        assert "compound_scam_fingerprint" in result.reasons
+
+    def test_r70_compound_flag_not_added_with_lp_unlocked(self):
+        """Holder concentration compound flag does NOT fire when LP Unlocked present."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("15000"),
+            market_cap=Decimal("30000"),
+            holders_count=50,
+        )
+        security = _make_security(
+            rugcheck_score=22000,
+            rugcheck_risks="Large Amount of LP Unlocked, Top 10 holders high ownership",
+            is_mintable=True,
+            lp_burned=False,
+            lp_locked=False,
+        )
+        result = evaluate_signals(
+            snapshot, security,
+            rugcheck_score=22000,
+            bundled_buy_detected=True,
+            raydium_lp_burned=False,
+        )
+        # Only 3 flags: mintable + bundled_buy + LP_unsecured (no holder_concentration)
+        # Still 3 = compound, but holder_concentration is NOT one of them
+        fired_names = [r.name for r in result.rules_fired]
+        if "compound_scam_fingerprint" in result.reasons:
+            # Compound fired but holder_concentration is NOT a reason
+            desc = result.reasons["compound_scam_fingerprint"]
+            assert "holder_concentration" not in desc

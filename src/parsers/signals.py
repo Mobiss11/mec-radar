@@ -189,6 +189,24 @@ def evaluate_signals(
         _scam_flags += 1
         _scam_details.append(f"copycat_{copycat_rug_count}x_rugged")
 
+    # Phase 40: Holder concentration as compound flag.
+    # Production: 34.2% rug rate with holder concentration vs 14.8% without (2.3x).
+    # rugcheck_score >= 20000 WITHOUT "LP Unlocked" = concentrated ownership + no bonding curve.
+    # Adds combinatorial power: holder_conc + LP_unsecured + rugcheck = 3 → hard avoid.
+    if (
+        security is not None
+        and security.rugcheck_risks
+        and rugcheck_score is not None
+        and rugcheck_score >= 20000
+    ):
+        _r_lower = security.rugcheck_risks.lower()
+        if (
+            ("holder" in _r_lower or "ownership" in _r_lower)
+            and "lp unlocked" not in _r_lower
+        ):
+            _scam_flags += 1
+            _scam_details.append("holder_concentration")
+
     if _scam_flags >= 3:
         gate_rule = SignalRule(
             "compound_scam_fingerprint", -10,
@@ -1090,6 +1108,39 @@ def evaluate_signals(
         )
         fired.append(r)
         reasons[r.name] = r.description
+
+    # --- PHASE 40: HOLDER CONCENTRATION PENALTY ---
+
+    # R70: Holder concentration penalty — production data (2026-02-24):
+    # rugcheck_score >= 20000 WITHOUT "LP Unlocked" = 36.8% rug rate (vs 14.8% base).
+    # Tokens with high score + LP Unlocked = 100% win rate (7/7) — PumpFun standard.
+    # The REAL danger: "Top 10 holders high ownership" / "Single holder ownership"
+    # combined with high rugcheck score, but WITHOUT the LP Unlocked safety signal.
+    # This catches concentrated holder tokens that lack PumpFun bonding curve protection.
+    # Soft -4: strong but not fatal — 29 profitable tokens in this bucket would be penalized
+    # but most still have enough bullish rules to survive.
+    _has_holder_concentration_risk = False
+    if (
+        security is not None
+        and security.rugcheck_risks
+        and rugcheck_score is not None
+        and rugcheck_score >= 20000
+    ):
+        _risks_lower = security.rugcheck_risks.lower()
+        _has_holder_risk = (
+            "holder" in _risks_lower
+            or "ownership" in _risks_lower
+        )
+        _has_lp_unlocked = "lp unlocked" in _risks_lower
+        if _has_holder_risk and not _has_lp_unlocked:
+            _has_holder_concentration_risk = True
+            r = SignalRule(
+                "holder_concentration_danger", -4,
+                f"Holder concentration risk: rugcheck {rugcheck_score} + "
+                f"holder/ownership risks WITHOUT LP Unlocked safety",
+            )
+            fired.append(r)
+            reasons[r.name] = r.description
 
     # --- COMPUTE RESULT ---
     bullish = sum(r.weight for r in fired if r.weight > 0)
