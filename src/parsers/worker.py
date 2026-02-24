@@ -2396,6 +2396,22 @@ async def _enrich_token(
                 try:
                     pairs = await dexscreener.get_token_pairs(task.address)
                     if pairs:
+                        # Phase 30: Only consider pairs where our token is baseToken
+                        # (priceUsd = price of baseToken; if our token is quoteToken,
+                        # priceUsd would be price of SOL/USDC — garbage data)
+                        valid_pairs = [
+                            p for p in pairs
+                            if p.baseToken and p.baseToken.address.lower() == task.address.lower()
+                        ]
+                        if valid_pairs:
+                            return max(
+                                valid_pairs,
+                                key=lambda p: (
+                                    p.liquidity.usd if p.liquidity and p.liquidity.usd else Decimal(0)
+                                ),
+                            )
+                        # Fallback: if no pairs have our token as base, use highest-liq pair
+                        # (some DEXes may not set baseToken correctly)
                         return max(
                             pairs,
                             key=lambda p: (
@@ -3669,6 +3685,7 @@ async def _paper_price_loop(
             token_prices: dict[int, Decimal] = {}
             live_liq_map: dict[int, float | None] = {}  # Live liquidity from API
             _stale_tokens: set[int] = set()  # token_ids with stale Birdeye price
+            _dead_tokens: set[int] = set()  # Phase 30: token_ids with dead price (>10min)
             if birdeye:
                 try:
                     import time as _time
@@ -3690,6 +3707,7 @@ async def _paper_price_loop(
                                     # Dead token: force liquidity=0 to trigger close
                                     live_liq_map[pos.token_id] = 0.0
                                     token_prices[pos.token_id] = bp.value  # Use last known price for PnL
+                                    _dead_tokens.add(pos.token_id)  # Phase 30
                                 else:
                                     logger.warning(f"[PAPER] Birdeye stale price for {pos.token_address[:12]}... (age={_age}s, skipping)")
                                 continue
@@ -3738,23 +3756,36 @@ async def _paper_price_loop(
                             if _tid and _tid not in live_liq_map:
                                 live_liq_map[_tid] = None  # Phase 36: No pairs = unknown (indexing lag)
                             continue
-                        # Pick the pair with highest liquidity (or highest price as tiebreaker)
+                        # Phase 30: Pick price from pair with HIGHEST liquidity
+                        # where our token is the baseToken (not quoteToken).
+                        # Old logic was broken: `p_usd > best_price or pair_liq > 100`
+                        # picked highest price from ANY pair, often returning SOL price
+                        # from inverted pairs or frozen bonding curve prices.
                         best_price = _Dec(0)
+                        best_price_liq = 0.0
                         max_liq = 0.0
                         for pair in pairs:
-                            # Collect liquidity from all pairs
+                            # Collect liquidity from all pairs (for liq_map)
                             pair_liq = float(pair.liquidity.usd) if pair.liquidity and pair.liquidity.usd else 0
                             max_liq = max(max_liq, pair_liq)
-                            # Collect price
+                            # Collect price — MUST verify baseToken is our token
                             if not pair.priceUsd or not pair.baseToken:
+                                continue
+                            # Phase 30: Skip pairs where our token is quoteToken
+                            # (priceUsd would be price of OTHER token, e.g. SOL)
+                            if pair.baseToken.address.lower() != addr.lower():
                                 continue
                             try:
                                 p_usd = _Dec(pair.priceUsd)
                             except Exception:
                                 continue
-                            # Prefer pair with real liquidity; among those, take highest price
-                            if p_usd > best_price or pair_liq > 100:
-                                best_price = max(best_price, p_usd)
+                            # Phase 30: Select price from pair with highest liquidity
+                            # (most reliable price discovery)
+                            if pair_liq > best_price_liq:
+                                best_price = p_usd
+                                best_price_liq = pair_liq
+                            elif pair_liq == best_price_liq and p_usd > best_price:
+                                best_price = p_usd
                         if best_price > 0:
                             dex_price_map[addr] = best_price
                         # Phase 37: DexScreener liq OVERRIDES Birdeye (more reliable for DEX pools)
@@ -3802,6 +3833,7 @@ async def _paper_price_loop(
                             session, token_id, price,
                             liquidity_usd=live_liq_map.get(token_id),
                             sol_price_usd=_sol_usd,
+                            is_dead_price=token_id in _dead_tokens,  # Phase 30
                         )
                     await session.commit()
 
@@ -3928,6 +3960,7 @@ async def _real_price_loop(
             # Primary: Birdeye multi-price WITH liquidity (Phase 36)
             token_prices: dict[int, Decimal] = {}
             live_liq_map: dict[int, float | None] = {}
+            _dead_tokens_r: set[int] = set()  # Phase 30: dead price tokens
             if birdeye:
                 try:
                     import time as _time_r
@@ -3946,6 +3979,7 @@ async def _real_price_loop(
                                     logger.warning(f"[REAL] Birdeye dead price for {pos.token_address[:12]}... (age={_age_r}s, marking liq=0)")
                                     live_liq_map[pos.token_id] = 0.0
                                     token_prices[pos.token_id] = bp.value
+                                    _dead_tokens_r.add(pos.token_id)  # Phase 30
                                 continue
                             token_prices[pos.token_id] = bp.value
                         # Phase 36: Extract liquidity from Birdeye
@@ -3979,17 +4013,28 @@ async def _real_price_loop(
                         if not _r_pairs:
                             continue
                         _r_max_liq = 0.0
+                        _r_best_price = _Dec_r(0)
+                        _r_best_liq = 0.0
                         for _r_pair in _r_pairs:
                             _r_pair_liq = float(_r_pair.liquidity.usd) if _r_pair.liquidity and _r_pair.liquidity.usd else 0
                             _r_max_liq = max(_r_max_liq, _r_pair_liq)
-                            # Also pick price from highest-liq pair for missing tokens
-                            if _r_tid and _r_tid not in token_prices and _r_pair.priceUsd:
+                            # Phase 30: Pick price from highest-liq pair where token is baseToken
+                            if (
+                                _r_tid
+                                and _r_tid not in token_prices
+                                and _r_pair.priceUsd
+                                and _r_pair.baseToken
+                                and _r_pair.baseToken.address.lower() == _r_addr.lower()
+                            ):
                                 try:
                                     _r_p = _Dec_r(_r_pair.priceUsd)
-                                    if _r_p > 0:
-                                        token_prices[_r_tid] = _r_p
+                                    if _r_p > 0 and _r_pair_liq > _r_best_liq:
+                                        _r_best_price = _r_p
+                                        _r_best_liq = _r_pair_liq
                                 except Exception:
                                     pass
+                        if _r_tid and _r_tid not in token_prices and _r_best_price > 0:
+                            token_prices[_r_tid] = _r_best_price
                         if _r_tid:
                             live_liq_map[_r_tid] = _r_max_liq
                     except Exception as e:
@@ -4025,6 +4070,7 @@ async def _real_price_loop(
                         session, token_id, price,
                         liquidity_usd=live_liq_map.get(token_id),
                         sol_price_usd=_sol_usd,
+                        is_dead_price=token_id in _dead_tokens_r,  # Phase 30
                     )
                 await session.commit()
 

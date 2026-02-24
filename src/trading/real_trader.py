@@ -242,6 +242,7 @@ class RealTrader:
         is_rug: bool = False,
         liquidity_usd: float | None = None,
         sol_price_usd: float | None = None,
+        is_dead_price: bool = False,
     ) -> None:
         """Update all open real positions for a token.
 
@@ -267,6 +268,23 @@ class RealTrader:
         _sol_usd = Decimal(str(sol_price_usd)) if sol_price_usd else Decimal("83")
 
         for pos in positions:
+            # Phase 30: Price sanity check — reject garbage prices
+            if pos.entry_price and pos.entry_price > 0:
+                price_ratio = float(current_price / pos.entry_price)
+                if price_ratio > 1000:
+                    logger.warning(
+                        f"[REAL] Rejecting garbage price for token_id={token_id}: "
+                        f"current={current_price} vs entry={pos.entry_price} "
+                        f"(ratio={price_ratio:.0f}x, likely bad API data)"
+                    )
+                    continue
+                if current_price > Decimal("1"):
+                    logger.warning(
+                        f"[REAL] Rejecting suspicious high price for token_id={token_id}: "
+                        f"${current_price} (memecoins rarely reach $1+)"
+                    )
+                    continue
+
             # Update price tracking
             pos.current_price = current_price
             if pos.max_price is None or current_price > pos.max_price:
@@ -289,6 +307,7 @@ class RealTrader:
                 stop_loss_pct=self._stop_loss_pct,
                 timeout_hours=self._timeout_hours,
                 liquidity_usd=liquidity_usd,
+                is_dead_price=is_dead_price,
             )
             if close_reason:
                 await self._execute_close(

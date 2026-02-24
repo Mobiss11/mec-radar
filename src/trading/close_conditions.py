@@ -25,6 +25,7 @@ def check_close_conditions(
     timeout_hours: int = 8,
     liquidity_usd: float | None = None,
     liquidity_grace_period_sec: int = 90,
+    is_dead_price: bool = False,
 ) -> str | None:
     """Check if position should be closed. Returns reason string or None.
 
@@ -39,6 +40,13 @@ def check_close_conditions(
     """
     # Liquidity critically low — pool drained, can't sell without massive slippage
     if liquidity_usd is not None and liquidity_usd < 5_000:
+        # Phase 30: Dead-price tokens (Birdeye stale >10min) should close immediately.
+        # Their price is frozen at last known value, so price_healthy check is invalid.
+        # Birdeye stops updating price when token migrates or dies — if we've confirmed
+        # the token is dead AND liquidity is 0, close unconditionally.
+        if is_dead_price and liquidity_usd == 0.0:
+            return "liquidity_removed"
+
         # Phase 37: Price-coherence check.
         # Birdeye multi_price often returns bonding-curve liquidity (near-zero)
         # instead of real DEX pool liquidity for migrated pump.fun tokens.

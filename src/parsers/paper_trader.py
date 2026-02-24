@@ -168,6 +168,7 @@ class PaperTrader:
         is_rug: bool = False,
         liquidity_usd: float | None = None,
         sol_price_usd: float | None = None,
+        is_dead_price: bool = False,
     ) -> None:
         """Update all open paper positions for a token."""
         if current_price is None or current_price <= 0:
@@ -186,6 +187,27 @@ class PaperTrader:
         _sol_usd = Decimal(str(sol_price_usd)) if sol_price_usd else Decimal("150")
 
         for pos in positions:
+            # Phase 30: Price sanity check — reject garbage prices
+            # A 1000x increase from entry in minutes is almost certainly bad data
+            # (e.g. DexScreener returning SOL price instead of token price).
+            # Real legitimate pumps rarely exceed 100x in first hours.
+            if pos.entry_price and pos.entry_price > 0:
+                price_ratio = float(current_price / pos.entry_price)
+                if price_ratio > 1000:
+                    logger.warning(
+                        f"[PAPER] Rejecting garbage price for token_id={token_id}: "
+                        f"current={current_price} vs entry={pos.entry_price} "
+                        f"(ratio={price_ratio:.0f}x, likely bad API data)"
+                    )
+                    continue
+                # Also reject if price is unrealistically high (>$1 for a memecoin)
+                if current_price > Decimal("1"):
+                    logger.warning(
+                        f"[PAPER] Rejecting suspicious high price for token_id={token_id}: "
+                        f"${current_price} (memecoins rarely reach $1+)"
+                    )
+                    continue
+
             pos.current_price = current_price
             if pos.max_price is None or current_price > pos.max_price:
                 pos.max_price = current_price
@@ -200,7 +222,9 @@ class PaperTrader:
 
             # Check close conditions (pass liquidity for LP removal detection)
             close_reason = self._check_close_conditions(
-                pos, current_price, is_rug, now, liquidity_usd=liquidity_usd,
+                pos, current_price, is_rug, now,
+                liquidity_usd=liquidity_usd,
+                is_dead_price=is_dead_price,
             )
             if close_reason:
                 await self._close_position(
@@ -216,6 +240,7 @@ class PaperTrader:
         is_rug: bool,
         now: datetime,
         liquidity_usd: float | None = None,
+        is_dead_price: bool = False,
     ) -> str | None:
         """Check if position should be closed. Returns reason or None.
 
@@ -230,6 +255,7 @@ class PaperTrader:
             stop_loss_pct=self._stop_loss_pct,
             timeout_hours=self._timeout_hours,
             liquidity_usd=liquidity_usd,
+            is_dead_price=is_dead_price,
         )
 
     async def _close_position(
