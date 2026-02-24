@@ -15,7 +15,8 @@ from jose import JWTError, jwt
 from config.settings import settings
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
+REFRESH_THRESHOLD_MINUTES = 720  # Refresh when >12h elapsed (sliding window)
 COOKIE_NAME = "access_token"
 
 
@@ -58,6 +59,19 @@ def decode_token(token: str) -> dict[str, Any]:
         return payload
     except JWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+def should_refresh_token(payload: dict[str, Any]) -> bool:
+    """Return True if token was issued more than REFRESH_THRESHOLD_MINUTES ago."""
+    iat = payload.get("iat")
+    if iat is None:
+        return False
+    if isinstance(iat, int | float):
+        issued = datetime.fromtimestamp(iat, tz=UTC)
+    else:
+        issued = iat
+    elapsed = (datetime.now(UTC) - issued).total_seconds() / 60
+    return elapsed > REFRESH_THRESHOLD_MINUTES
 
 
 def generate_csrf_token(jwt_payload: dict[str, Any]) -> str:

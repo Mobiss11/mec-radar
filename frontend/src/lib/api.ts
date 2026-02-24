@@ -24,6 +24,10 @@ async function request<T>(
   })
 
   if (res.status === 401) {
+    // Session expired — redirect to login (avoid redirect loops on auth endpoints)
+    if (!path.startsWith("/auth/")) {
+      window.location.href = "/login"
+    }
     throw new ApiError(401, "Unauthorized")
   }
 
