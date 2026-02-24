@@ -76,3 +76,36 @@ export function timeAgo(iso: string | null | undefined): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
   return `${Math.floor(diff / 86400)}d ago`
 }
+
+/** Format ISO datetime as "24 фев 18:05" (Moscow time, already comes as +03:00 from API) */
+export function formatDateMsk(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return "—"
+  // API sends +03:00, browser parses it correctly
+  // Use Intl to format in Moscow timezone regardless of user's local TZ
+  const fmt = new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "Europe/Moscow",
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+  return fmt.format(d).replace(",", "")
+}
+
+/** Format ISO datetime as "18:05:23" (Moscow time, HH:MM:SS) */
+export function formatTimeMsk(iso: string | null | undefined): string {
+  if (!iso) return "—"
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return "—"
+  const fmt = new Intl.DateTimeFormat("ru-RU", {
+    timeZone: "Europe/Moscow",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })
+  return fmt.format(d)
+}

@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+
+# Moscow timezone (UTC+3) for display
+_MSK = timezone(timedelta(hours=3))
+
+
+def _to_msk_iso(dt: datetime | None) -> str | None:
+    """Convert naive UTC datetime to Moscow time ISO string with +03:00 suffix."""
+    if not dt:
+        return None
+    return dt.replace(tzinfo=UTC).astimezone(_MSK).isoformat()
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from loguru import logger
@@ -302,8 +312,8 @@ async def list_positions(
             "close_reason": p.close_reason,
             "is_paper": bool(p.is_paper),
             "tx_hash": tx_hash_map.get(p.token_id) if not p.is_paper else None,
-            "opened_at": p.opened_at.isoformat() if p.opened_at else None,
-            "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+            "opened_at": _to_msk_iso(p.opened_at),
+            "closed_at": _to_msk_iso(p.closed_at),
         })
 
     next_cursor = items[-1]["id"] if items and has_more else None
@@ -357,8 +367,8 @@ async def position_detail(
         "max_price": float(pos.max_price) if pos.max_price else None,
         "status": pos.status,
         "close_reason": pos.close_reason,
-        "opened_at": pos.opened_at.isoformat() if pos.opened_at else None,
-        "closed_at": pos.closed_at.isoformat() if pos.closed_at else None,
+        "opened_at": _to_msk_iso(pos.opened_at),
+        "closed_at": _to_msk_iso(pos.closed_at),
     }
 
     trade_items = []
@@ -372,7 +382,7 @@ async def position_detail(
             "fee_sol": float(t.fee_sol) if t.fee_sol else None,
             "tx_hash": t.tx_hash,
             "is_paper": bool(t.is_paper),
-            "executed_at": t.executed_at.isoformat() if t.executed_at else None,
+            "executed_at": _to_msk_iso(t.executed_at),
         })
 
     return {"position": pos_dict, "trades": trade_items}

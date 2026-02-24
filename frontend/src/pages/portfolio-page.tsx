@@ -8,7 +8,7 @@ import { AddressBadge } from "@/components/common/address-badge"
 import { EmptyState } from "@/components/common/empty-state"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
-import { formatCompact, formatPct, formatPrice, formatSol, formatUsd, timeAgo } from "@/lib/format"
+import { formatCompact, formatDateMsk, formatPct, formatPrice, formatSol, formatUsd, timeAgo } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import type { PortfolioMode } from "@/types/api"
 import {
@@ -502,7 +502,18 @@ export function PortfolioPage() {
                         Liq: ${formatCompact(p.current_liq as number)}
                       </span>
                     )}
-                    <span>{timeAgo((p.opened_at ?? p.closed_at) as string)}</span>
+                    {/* Timestamps: opened / closed in Moscow time */}
+                    <span title={p.opened_at ? `Вход: ${String(p.opened_at)}` : ""}>
+                      ⏱ {formatDateMsk(p.opened_at as string)}
+                    </span>
+                    {p.closed_at ? (
+                      <span title={`Закрытие: ${String(p.closed_at)}`}>
+                        → {formatDateMsk(p.closed_at as string)}
+                      </span>
+                    ) : null}
+                    <span className="text-muted-foreground/50">
+                      ({timeAgo((p.closed_at ?? p.opened_at) as string)})
+                    </span>
                     <a
                       href={`https://gmgn.ai/sol/token/${p.token_address}`}
                       target="_blank"
