@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     enable_wash_trading_detection: bool = True
     enable_rugcheck_risk_parsing: bool = True
     enable_lp_monitor: bool = True
+    enable_rug_guard: bool = True  # Phase 45: real-time LP removal via gRPC
     enable_cross_token_whales: bool = True
     enable_website_checker: bool = True  # no API key needed
 

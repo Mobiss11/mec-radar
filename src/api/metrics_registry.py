@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from src.parsers.metrics import EnrichmentMetrics
     from src.parsers.paper_trader import PaperTrader
     from src.parsers.pumpportal.ws_client import PumpPortalClient
+    from src.parsers.rug_guard import RugGuard
     from src.parsers.solsniffer.client import SolSnifferClient
     from src.trading.real_trader import RealTrader
 
@@ -36,6 +37,7 @@ class MetricsRegistry:
     alert_dispatcher: AlertDispatcher | None = None
     paper_trader: PaperTrader | None = None
     real_trader: RealTrader | None = None
+    rug_guard: RugGuard | None = None
     solsniffer: SolSnifferClient | None = None
     redis: Any | None = None  # Redis[bytes]
 

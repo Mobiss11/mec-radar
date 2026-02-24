@@ -143,6 +143,7 @@ from src.parsers.rugcheck_risk_parser import parse_rugcheck_risks
 from src.parsers.wallet_cluster import detect_coordinated_traders
 from src.parsers.wallet_age import check_wallet_ages
 from src.parsers.lp_events import detect_lp_events_onchain
+from src.parsers.rug_guard import RugGuard
 # Phase 15: Paid API integrations
 from src.parsers.chainstack.grpc_client import ChainstackGrpcClient
 # VybeClient import removed — holder PnL now computed from GMGN data
@@ -720,6 +721,17 @@ async def run_parser() -> None:
             logger.error(f"[REAL] Failed to initialize real trading: {e}")
             real_trader = None
 
+    # Phase 45: RugGuard — real-time LP removal detection via gRPC
+    rug_guard: RugGuard | None = None
+    if settings.enable_rug_guard and grpc_client and (paper_trader or real_trader):
+        rug_guard = RugGuard(
+            paper_trader=paper_trader,
+            real_trader=real_trader,
+            alert_dispatcher=alert_dispatcher,
+        )
+        grpc_client.on_lp_removal = rug_guard.on_lp_removal
+        logger.info("[RUGGUARD] Enabled — real-time LP removal detection via gRPC")
+
     # Build task list based on feature flags
     tasks: list[asyncio.Task] = []
 
@@ -866,6 +878,16 @@ async def run_parser() -> None:
         )
         logger.info("[REAL] Real trading sweep (5m) loop enabled")
 
+    # Phase 45: RugGuard position refresh loop
+    if rug_guard:
+        tasks.append(
+            asyncio.create_task(
+                rug_guard.run_refresh_loop(),
+                name="rug_guard_refresh",
+            )
+        )
+        logger.info("[RUGGUARD] Position refresh loop enabled (30s)")
+
     # Signal decay loop
     if settings.signal_decay_enabled:
         tasks.append(
@@ -896,6 +918,7 @@ async def run_parser() -> None:
         registry.alert_dispatcher = alert_dispatcher
         registry.paper_trader = paper_trader
         registry.real_trader = real_trader
+        registry.rug_guard = rug_guard
         registry.solsniffer = solsniffer
         registry.redis = redis
 
