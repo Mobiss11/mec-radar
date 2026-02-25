@@ -140,14 +140,18 @@ def evaluate_signals(
             reasons={gate_rule.name: gate_rule.description},
         )
 
-    # HG3: Extreme rugcheck score — DATACLAW (41 tokens/hr, all rugs), NIP pattern.
-    # Production backtest (34 real trades): 15K threshold catches DATACLAW ($-20.31)
-    # without cutting any profitable tokens. Old 20K missed it (rc=17550).
-    # Net benefit: +$28.68 (5 losses blocked, 3 profits lost via recheck).
-    if rugcheck_score is not None and rugcheck_score > 15000:
+    # HG3: Clean-only filter — block tokens with rugcheck score > 1000.
+    # Production backtest (129 closed positions, 7 days):
+    #   CLEAN (rc NULL/≤1000): 51 trades, 47.1% WR, PnL +$189.15
+    #   DIRTY (rc >1000):      78 trades, 53.8% WR, PnL -$261.17
+    # Dirty has higher WR but catastrophic -100% rug losses kill PnL.
+    # At $20/trade simulation: CLEAN +$35.70, DIRTY -$262.36, ALL -$226.65.
+    # rc=NULL = fresh pump.fun (no rugcheck data yet) = safe pattern.
+    # rc≤1000 = very clean. rc>1000 = Raydium migrants with rug risks.
+    if rugcheck_score is not None and rugcheck_score > 1000:
         gate_rule = SignalRule(
-            "extreme_rugcheck_gate", -10,
-            f"Hard gate: rugcheck score {rugcheck_score} > 15000 (extreme scam)",
+            "dirty_token_gate", -10,
+            f"Hard gate: rugcheck score {rugcheck_score} > 1000 (clean-only filter)",
         )
         return SignalResult(
             rules_fired=[gate_rule],

@@ -536,8 +536,8 @@ class TestFastEntryRules:
         )
         assert "fresh_volume_surge" not in result.reasons
 
-    def test_r55_blocked_by_extreme_rugcheck(self):
-        """R55 does NOT fire when rugcheck_score >= 5000 (extreme danger)."""
+    def test_r55_blocked_by_dirty_gate(self):
+        """Phase 48: R55 does NOT fire when rc > 1000 — dirty_token_gate blocks first."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174000"),
             market_cap=Decimal("261000"),  # MCap/Liq = 1.5
@@ -549,9 +549,10 @@ class TestFastEntryRules:
             snapshot, _make_security(),
             prev_snapshot=None,
             token_age_minutes=1.0,
-            rugcheck_score=11500,
+            rugcheck_score=1001,
         )
         assert "early_organic_momentum" not in result.reasons
+        assert "dirty_token_gate" in result.reasons
 
     def test_r55_allowed_with_low_rugcheck(self):
         """R55 fires when rugcheck < 5000 (normal noise level)."""
@@ -603,50 +604,37 @@ class TestAntiRugRules:
     """R15 tiered, R57 graduation_rug_pattern, R58 bot_holder_farming."""
 
     # --- R15 Tiered Rugcheck ---
+    # Phase 48: dirty_token_gate blocks all rc > 1000, so R15 only fires for rc 50-1000.
 
     def test_r15_low_rugcheck_penalty_minus2(self):
-        """Rugcheck 200 (typical noise) → -2 penalty."""
+        """Rugcheck 200 (typical noise, clean range) → -2 penalty."""
         snapshot = _make_snapshot()
         result = evaluate_signals(snapshot, _make_security(), rugcheck_score=200)
         assert "rugcheck_danger" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
         assert rule.weight == -2
 
-    def test_r15_extreme_rugcheck_penalty_minus5(self):
-        """Rugcheck 11500 (scam-level) → -5 penalty."""
+    def test_r15_high_clean_rugcheck(self):
+        """Rugcheck 900 (near dirty boundary but clean) → -2 penalty."""
         snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=11500)
+        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=900)
         assert "rugcheck_danger" in result.reasons
         rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
-        assert rule.weight == -5
+        assert rule.weight == -2
 
-    def test_r15_boundary_5000_is_extreme(self):
-        """Rugcheck exactly 5000 → extreme tier (-5)."""
+    def test_r15_superseded_by_dirty_gate_11500(self):
+        """Phase 48: Rugcheck 11500 → dirty_token_gate fires, R15 unreachable."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=11500)
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
+
+    def test_r15_superseded_by_dirty_gate_5000(self):
+        """Phase 48: Rugcheck 5000 → dirty_token_gate fires, R15 unreachable."""
         snapshot = _make_snapshot()
         result = evaluate_signals(snapshot, _make_security(), rugcheck_score=5000)
-        rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
-        assert rule.weight == -5
-
-    def test_r15_boundary_4999_is_high_danger(self):
-        """Rugcheck 4999 → high danger tier (-4, Phase 39)."""
-        snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=4999)
-        rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
-        assert rule.weight == -4
-
-    def test_r15_boundary_3000_is_high_danger(self):
-        """Rugcheck 3000 → high danger tier (-4, Phase 39)."""
-        snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=3000)
-        rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
-        assert rule.weight == -4
-
-    def test_r15_boundary_2999_is_normal(self):
-        """Rugcheck 2999 → normal tier (-2)."""
-        snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, _make_security(), rugcheck_score=2999)
-        rule = next(r for r in result.rules_fired if r.name == "rugcheck_danger")
-        assert rule.weight == -2
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
     def test_r15_no_rugcheck(self):
         """No rugcheck data → rule does not fire."""
@@ -733,8 +721,8 @@ class TestAntiRugRules:
 
     # --- R57b: Original Graduation Rug (elif, $50-100K) ---
 
-    def test_r57b_medium_pool_with_rugcheck(self):
-        """$75K pool with high rugcheck → R57b fires (-5)."""
+    def test_r57b_superseded_by_dirty_gate(self):
+        """Phase 48: $75K pool with rc=11500 → dirty_token_gate fires before R57b."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("75000"),
             market_cap=Decimal("90000"),  # ratio 1.2x
@@ -744,12 +732,11 @@ class TestAntiRugRules:
             rugcheck_score=11500,
             token_age_minutes=1.0,
         )
-        assert "graduation_rug_pattern" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "graduation_rug_pattern")
-        assert rule.weight == -5
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
     def test_r57b_not_on_low_rugcheck(self):
-        """$75K pool with low rugcheck → R57b does NOT fire."""
+        """$75K pool with low rugcheck → R57b does NOT fire (requires rc >= 5000)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("75000"),
             market_cap=Decimal("90000"),
@@ -762,28 +749,30 @@ class TestAntiRugRules:
         assert "graduation_rug_pattern" not in result.reasons
 
     def test_r57a_preempts_r57b(self):
-        """$174K pool → R57a fires, R57b does NOT (elif)."""
+        """Phase 48: $174K pool with rc=11500 → dirty_token_gate fires before R57a/R57b.
+        R57a still fires without rugcheck — test with rc=None."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174000"),
             market_cap=Decimal("261000"),
         )
+        # With rc=None (clean pattern), R57a structural fires on liq alone
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=11500,
+            rugcheck_score=None,
             token_age_minutes=0.8,
         )
         assert "graduation_rug_structural" in result.reasons
         assert "graduation_rug_pattern" not in result.reasons
 
     def test_r57_not_on_small_pool(self):
-        """R57b does NOT fire on small pools < $50K liq."""
+        """R57b does NOT fire on small pools < $50K liq (clean rc)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("15000"),
         )
         result = evaluate_signals(
             snapshot, _make_security(),
-            rugcheck_score=11500,
+            rugcheck_score=500,
             token_age_minutes=1.0,
         )
         assert "graduation_rug_pattern" not in result.reasons
@@ -1015,8 +1004,7 @@ class TestAntiRugRules:
 
     def test_pankun_full_scenario_blocked(self):
         """Pan-kun graduation: liq=$174K → blocked by R57a + cap.
-
-        Phase 31b: R57a(-7) alone is heavy. With graduation cap → max watch.
+        Phase 48: rc=9601 blocked by dirty_token_gate. Test with rc=None.
         """
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("174190"),
@@ -1034,7 +1022,7 @@ class TestAntiRugRules:
         result = evaluate_signals(
             snapshot, _make_security(),
             prev_snapshot=prev,
-            rugcheck_score=9601,
+            rugcheck_score=None,
             token_age_minutes=0.8,
             holder_velocity=185.0,
             holder_growth_pct=5100.0,
@@ -1045,12 +1033,10 @@ class TestAntiRugRules:
 
     # --- Backtest: Profitable Tokens NOT Blocked ---
 
-    def test_profitable_hua_hua_capped_at_low_liq(self):
-        """Hua Hua: liq=$14K + rugcheck=11500 + velocity=511 = bot farm profile.
-        Phase 41 R72 correctly caps this — 36% of positions with this profile
-        are rugs in production. At higher liq ($25K), cap doesn't apply."""
-        # Low liq profile — R72 caps bullish, R69 fires compound penalty
-        snapshot_low = _make_snapshot(
+    def test_profitable_hua_hua_blocked_by_dirty_gate(self):
+        """Phase 48: Hua Hua rc=11500 → dirty_token_gate fires (clean-only filter).
+        Previously R72 capped bullish. Now entire token is blocked as dirty."""
+        snapshot = _make_snapshot(
             liquidity_usd=Decimal("14444"),
             market_cap=Decimal("8389"),
             holders_count=299,
@@ -1058,39 +1044,19 @@ class TestAntiRugRules:
             sells_1h=60,
             score=53,
         )
-        result_low = evaluate_signals(
-            snapshot_low, _make_security(),
+        result = evaluate_signals(
+            snapshot, _make_security(),
             rugcheck_score=11500,
             holder_growth_pct=1561.0,
             token_age_minutes=0.8,
             holder_velocity=511.0,
         )
-        # R72 correctly caps bot-farm-like velocity on micro-liq
-        assert "low_liq_velocity_cap" in result_low.reasons
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
-        # Same velocity at higher liq ($35K) → R72 cap AND R69 compound don't apply
-        # (R69 requires liq < $30K)
-        snapshot_high = _make_snapshot(
-            liquidity_usd=Decimal("35000"),
-            market_cap=Decimal("25000"),
-            holders_count=299,
-            buys_1h=359,
-            sells_1h=60,
-            score=53,
-        )
-        result_high = evaluate_signals(
-            snapshot_high, _make_security(),
-            rugcheck_score=11500,
-            holder_growth_pct=1561.0,
-            token_age_minutes=0.8,
-            holder_velocity=511.0,
-        )
-        assert "low_liq_velocity_cap" not in result_high.reasons
-        assert "velocity_danger_compound" not in result_high.reasons
-        assert result_high.action in ("buy", "strong_buy", "watch")
-
-    def test_profitable_cash_not_blocked(self):
-        """Real profit: CASH +111% at liq=$12.6K → NOT blocked."""
+    def test_profitable_cash_blocked_dirty(self):
+        """Phase 48: CASH rc=2001 → dirty_token_gate fires (clean-only filter).
+        Previously profitable, but dirty tokens lose money overall."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("12611"),
             market_cap=Decimal("59224"),
@@ -1104,11 +1070,11 @@ class TestAntiRugRules:
             rugcheck_score=2001,
             token_age_minutes=0.8,
         )
-        assert "graduation_rug_structural" not in result.reasons
-        assert "bot_holder_farming" not in result.reasons
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
-    def test_profitable_pankun_lowliq_not_blocked(self):
-        """Real profit: Pan-kun +107% at liq=$13.8K → NOT blocked."""
+    def test_profitable_pankun_lowliq_blocked_dirty(self):
+        """Phase 48: Pan-kun rc=11500 → dirty_token_gate fires."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("13801"),
             market_cap=Decimal("30429"),
@@ -1124,13 +1090,11 @@ class TestAntiRugRules:
             token_age_minutes=0.8,
             holder_velocity=133.0,
         )
-        assert "graduation_rug_structural" not in result.reasons
-        assert "extreme_graduation_growth" not in result.reasons
-        # R58: growth 429% < 500 → doesn't fire
-        assert "bot_holder_farming" not in result.reasons
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
-    def test_profitable_agent1c_lowliq_not_blocked(self):
-        """Real profit: agent1c +124% at liq=$14.3K → NOT blocked."""
+    def test_profitable_agent1c_lowliq_blocked_dirty(self):
+        """Phase 48: agent1c rc=15357 → dirty_token_gate fires."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("14274"),
             market_cap=Decimal("12611"),
@@ -1145,18 +1109,21 @@ class TestAntiRugRules:
             token_age_minutes=0.8,
             holder_velocity=194.0,
         )
-        assert "graduation_rug_structural" not in result.reasons
-        assert "bot_holder_farming" not in result.reasons
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
 
 # --- Phase 39: R69 Velocity Danger Compound ---
 
 
 class TestVelocityDangerCompound:
-    """R69: holder_velocity >= 200 + rugcheck >= 3000 + liq < $30K → -6."""
+    """R69: holder_velocity >= 200 + rugcheck >= 3000 + liq < $30K → -6.
+    Phase 48: R69 is now superseded by dirty_token_gate (rc > 1000).
+    All rc >= 3000 tokens are blocked before R69 can fire.
+    """
 
-    def test_r69_moltgen_pattern_fires(self):
-        """MOLTGEN: 417 holders/min + rugcheck 3501 + $13K liq → R69 fires."""
+    def test_r69_superseded_by_dirty_gate(self):
+        """Phase 48: MOLTGEN rc=3501 → dirty_token_gate fires before R69."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("13000"),
             market_cap=Decimal("13000"),
@@ -1168,12 +1135,11 @@ class TestVelocityDangerCompound:
             rugcheck_score=3501,
             token_age_minutes=0.5,
         )
-        assert "velocity_danger_compound" in result.reasons
-        rule = next(r for r in result.rules_fired if r.name == "velocity_danger_compound")
-        assert rule.weight == -6
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
     def test_r69_not_on_clean_rugcheck(self):
-        """High velocity + clean rugcheck (<3000) → R69 does NOT fire."""
+        """High velocity + clean rugcheck (800) → R69 does NOT fire (needs >= 3000)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("13000"),
             market_cap=Decimal("13000"),
@@ -1182,88 +1148,21 @@ class TestVelocityDangerCompound:
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_velocity=300.0,
-            rugcheck_score=2000,
+            rugcheck_score=800,
             token_age_minutes=1.0,
         )
         assert "velocity_danger_compound" not in result.reasons
-
-    def test_r69_not_on_high_liq(self):
-        """High velocity + rugcheck 3500 + $50K liq → R69 does NOT fire."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("50000"),
-            market_cap=Decimal("50000"),
-            holders_count=500,
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            holder_velocity=400.0,
-            rugcheck_score=3500,
-            token_age_minutes=0.5,
-        )
-        assert "velocity_danger_compound" not in result.reasons
-
-    def test_r69_not_on_low_velocity(self):
-        """Moderate velocity (150/min) + rugcheck 3500 + low liq → R69 does NOT fire."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("13000"),
-            market_cap=Decimal("13000"),
-            holders_count=100,
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            holder_velocity=150.0,
-            rugcheck_score=3500,
-            token_age_minutes=1.0,
-        )
-        assert "velocity_danger_compound" not in result.reasons
-
-    def test_r69_boundary_exactly_200_and_3000(self):
-        """Exact boundary: velocity=200, rugcheck=3000, liq=$29K → fires."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("29000"),
-            market_cap=Decimal("29000"),
-            holders_count=150,
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            holder_velocity=200.0,
-            rugcheck_score=3000,
-            token_age_minutes=1.0,
-        )
-        assert "velocity_danger_compound" in result.reasons
-
-    def test_r69_profitable_agent1c_not_hit(self):
-        """Safety: agent1c +124% had velocity=194 + rugcheck=15357 + liq=$14K.
-        R69 requires rugcheck 3000-4999. Score 15357 >= 5000 → out of range.
-        (The 5000+ tier is handled by R15 -5 penalty instead.)"""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("14274"),
-            market_cap=Decimal("12611"),
-            holders_count=269,
-        )
-        result = evaluate_signals(
-            snapshot, _make_security(),
-            holder_velocity=194.0,
-            rugcheck_score=15357,
-            token_age_minutes=0.8,
-        )
-        # R69 checks rugcheck_score >= 3000 (no upper bound), so 15357 qualifies.
-        # But velocity 194 < 200 → does NOT fire.
-        assert "velocity_danger_compound" not in result.reasons
+        assert "dirty_token_gate" not in result.reasons
 
 
 class TestHolderConcentrationDanger:
     """R70: Holder concentration penalty (Phase 40).
-
-    Production data (2026-02-24):
-    - rugcheck >= 20000 WITHOUT LP Unlocked: 36.8% rug rate, 50.9% win
-    - rugcheck >= 20000 WITH LP Unlocked: 100% win rate, 0 rugs (7 trades)
-    - Holder concentration risk: 34.2% rug rate vs 14.8% without (2.3x)
+    Phase 48: R70 requires rc >= 13000, which is now blocked by dirty_token_gate (rc > 1000).
+    All R70 tests verify that dirty_token_gate fires first.
     """
 
-    def test_r70_fires_holder_risk_high_rugcheck_no_lp_unlocked(self):
-        """Phase 46: rugcheck > 20000 now triggers extreme_rugcheck_gate hard block.
-        R70 holder_concentration_danger is superseded by HG3."""
+    def test_r70_superseded_by_dirty_gate(self):
+        """Phase 48: rc=21000 → dirty_token_gate fires before R70."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
@@ -1277,125 +1176,11 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=21000,
         )
-        # Hard gate fires before R70 can trigger
         assert result.action == "avoid"
-        assert "extreme_rugcheck_gate" in result.reasons
+        assert "dirty_token_gate" in result.reasons
 
-    def test_r70_unreachable_after_hg3_lowered(self):
-        """Phase 47: HG3 threshold lowered to 15K. R70 requires >= 20000 which is
-        above HG3 threshold, so R70 is now unreachable (HG3 hard-blocks first).
-        Verify that rugcheck >= 20000 hits HG3, not R70."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("20000"),
-            market_cap=Decimal("40000"),
-            holders_count=80,
-        )
-        security = _make_security(
-            rugcheck_score=20000,
-            rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=20000,
-        )
-        # HG3 hard gate fires at > 15000, blocking R70
-        assert result.action == "avoid"
-        assert "extreme_rugcheck_gate" in result.reasons
-
-    def test_r70_safe_with_lp_unlocked(self):
-        """LP Unlocked present = PumpFun standard. 100% win rate at high rugcheck.
-        Phase 46: rugcheck > 20000 triggers hard gate regardless of LP Unlocked."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("15000"),
-            market_cap=Decimal("30000"),
-            holders_count=50,
-        )
-        security = _make_security(
-            rugcheck_score=21000,
-            rugcheck_risks="Large Amount of LP Unlocked, Top 10 holders high ownership, Low Liquidity",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=21000,
-        )
-        # Hard gate fires for rugcheck > 20000 regardless
-        assert result.action == "avoid"
-        assert "extreme_rugcheck_gate" in result.reasons
-
-    def test_r70_safe_low_rugcheck(self):
-        """rugcheck_score < 20000 → R70 does NOT fire even with holder risks.
-        Phase 46: single_holder_gate fires for 'single holder ownership'."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("20000"),
-            market_cap=Decimal("40000"),
-            holders_count=80,
-        )
-        security = _make_security(
-            rugcheck_score=15000,
-            rugcheck_risks="Top 10 holders high ownership, Single holder ownership",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=15000,
-        )
-        # Phase 46: single_holder_gate fires for "single holder ownership"
-        assert result.action == "avoid"
-        assert "single_holder_gate" in result.reasons
-
-    def test_r70_safe_no_holder_risk_keywords(self):
-        """High rugcheck but no holder/ownership keywords → HG3 still fires (Phase 46)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("20000"),
-            market_cap=Decimal("40000"),
-            holders_count=80,
-        )
-        security = _make_security(
-            rugcheck_score=25000,
-            rugcheck_risks="Low Liquidity, Mutable Metadata, No Socials",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=25000,
-        )
-        # Phase 46: extreme_rugcheck_gate fires for rugcheck > 20000
-        assert result.action == "avoid"
-        assert "extreme_rugcheck_gate" in result.reasons
-
-    def test_r70_safe_no_security(self):
-        """No security object → HG3 still fires for rugcheck > 20000 (Phase 46)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("20000"),
-            market_cap=Decimal("40000"),
-            holders_count=80,
-        )
-        result = evaluate_signals(
-            snapshot, None,
-            rugcheck_score=25000,
-        )
-        # Phase 46: extreme_rugcheck_gate fires for rugcheck > 20000
-        assert result.action == "avoid"
-        assert "extreme_rugcheck_gate" in result.reasons
-
-    def test_r70_safe_no_rugcheck_risks(self):
-        """Security exists but rugcheck_risks is None → HG3 still fires (Phase 46)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("20000"),
-            market_cap=Decimal("40000"),
-            holders_count=80,
-        )
-        security = _make_security(
-            rugcheck_score=25000,
-            rugcheck_risks=None,
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=25000,
-        )
-        assert "holder_concentration_danger" not in result.reasons
-
-    def test_r70_boundary_rugcheck_exactly_13000(self):
-        """Phase 47: Exact boundary: rugcheck_score=13000 + holder risk + no LP Unlocked → fires.
-        R70 threshold lowered from 20K to 13K to catch CHILLHOUSE (rc=13500) pattern."""
+    def test_r70_all_dirty_blocked(self):
+        """Phase 48: rc=13000 → dirty_token_gate fires before R70 can trigger."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
@@ -1409,128 +1194,26 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=13000,
         )
-        assert "holder_concentration_danger" in result.reasons
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
 
-    def test_r70_boundary_rugcheck_12999(self):
-        """Just below boundary: rugcheck_score=12999 → R70 does NOT fire."""
+    def test_r70_clean_tokens_not_blocked(self):
+        """Clean tokens (rc=800) pass dirty_token_gate. R70 needs rc >= 13000, so no fire."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
             holders_count=80,
         )
         security = _make_security(
-            rugcheck_score=12999,
+            rugcheck_score=800,
             rugcheck_risks="Top 10 holders high ownership",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=12999,
+            rugcheck_score=800,
         )
+        assert "dirty_token_gate" not in result.reasons
         assert "holder_concentration_danger" not in result.reasons
-
-    def test_r70_ownership_keyword_variant(self):
-        """Phase 47: R70 threshold lowered to 13K. Test with score=14000 (between R70 and HG3)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("15000"),
-            market_cap=Decimal("30000"),
-            holders_count=50,
-        )
-        security = _make_security(
-            rugcheck_score=14000,
-            rugcheck_risks="Single ownership concentration, Low Liquidity",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=14000,
-        )
-        assert "holder_concentration_danger" in result.reasons
-
-    def test_r70_case_insensitive(self):
-        """Risk string matching is case-insensitive. Use rugcheck=14000 (between R70 13K and HG3 15K)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("15000"),
-            market_cap=Decimal("30000"),
-            holders_count=50,
-        )
-        security = _make_security(
-            rugcheck_score=14000,
-            rugcheck_risks="TOP 10 HOLDERS HIGH OWNERSHIP, LOW LIQUIDITY",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=14000,
-        )
-        assert "holder_concentration_danger" in result.reasons
-
-    def test_r70_lp_unlocked_case_insensitive(self):
-        """LP Unlocked exemption is case-insensitive. Use rugcheck=14000 (between R70 and HG3)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("15000"),
-            market_cap=Decimal("30000"),
-            holders_count=50,
-        )
-        security = _make_security(
-            rugcheck_score=14000,
-            rugcheck_risks="lp unlocked, top 10 holders high ownership",
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=14000,
-        )
-        assert "holder_concentration_danger" not in result.reasons
-
-    def test_r70_as_compound_scam_flag(self):
-        """Phase 47: Test compound with rugcheck=14000 (between R70 13K and HG3 15K)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("15000"),
-            market_cap=Decimal("30000"),
-            holders_count=50,
-        )
-        security = _make_security(
-            rugcheck_score=14000,
-            rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
-            is_mintable=True,      # compound flag: mintable
-            lp_burned=False,       # compound flag: LP_unsecured
-            lp_locked=False,
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=14000,
-            bundled_buy_detected=True,  # compound flag: bundled_buy
-            raydium_lp_burned=False,    # needed for LP_unsecured flag
-        )
-        # 4 flags: mintable + bundled_buy + LP_unsecured + holder_concentration = hard avoid
-        assert result.action == "avoid"
-        assert "compound_scam_fingerprint" in result.reasons
-
-    def test_r70_compound_flag_not_added_with_lp_unlocked(self):
-        """Holder concentration compound flag does NOT fire when LP Unlocked present.
-        Use rugcheck=14000 (between R70 13K and HG3 15K)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("15000"),
-            market_cap=Decimal("30000"),
-            holders_count=50,
-        )
-        security = _make_security(
-            rugcheck_score=14000,
-            rugcheck_risks="Large Amount of LP Unlocked, Top 10 holders high ownership",
-            is_mintable=True,
-            lp_burned=False,
-            lp_locked=False,
-        )
-        result = evaluate_signals(
-            snapshot, security,
-            rugcheck_score=14000,
-            bundled_buy_detected=True,
-            raydium_lp_burned=False,
-        )
-        # Only 3 flags: mintable + bundled_buy + LP_unsecured (no holder_concentration)
-        # Still 3 = compound, but holder_concentration is NOT one of them
-        fired_names = [r.name for r in result.rules_fired]
-        if "compound_scam_fingerprint" in result.reasons:
-            # Compound fired but holder_concentration is NOT a reason
-            desc = result.reasons["compound_scam_fingerprint"]
-            assert "holder_concentration" not in desc
 
 
 class TestLowLiqVelocityCap:
@@ -1544,7 +1227,8 @@ class TestLowLiqVelocityCap:
 
     def test_r72_caps_bullish_at_8_on_low_liq(self):
         """Bot farm pattern: liq $15K, 80 buys, velocity 200/min → +15 bullish.
-        With cap: bullish capped at 8, so bearish -7 → net +1 → avoid."""
+        Phase 48: use rc=None (clean) since rc=11500 is blocked by dirty_token_gate.
+        With cap: bullish capped at 8."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("9000"),
@@ -1559,7 +1243,7 @@ class TestLowLiqVelocityCap:
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_velocity=200.0,
-            rugcheck_score=11500,
+            rugcheck_score=None,
             token_age_minutes=0.5,
             holder_growth_pct=200.0,
         )
@@ -1604,8 +1288,8 @@ class TestLowLiqVelocityCap:
         assert "low_liq_velocity_cap" not in result.reasons
 
     def test_r72_scam_pattern_becomes_avoid(self):
-        """Full FROG-like scam: +15 bullish - 7 bearish = net +8 (strong_buy).
-        With R72 cap: +8 - 7 = net +1 → avoid."""
+        """Full FROG-like scam: +15 bullish - bearish = high net.
+        Phase 48: use rc=None (clean). With R72 cap: bullish capped at 8."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("18000"),
             market_cap=Decimal("9500"),
@@ -1620,12 +1304,11 @@ class TestLowLiqVelocityCap:
         result = evaluate_signals(
             snapshot, _make_security(),
             holder_velocity=176.0,
-            rugcheck_score=11500,
+            rugcheck_score=None,
             token_age_minutes=0.5,
             holder_growth_pct=200.0,
         )
-        # Bullish capped at 8, rugcheck -5 + low_liq -2 = -7 bearish
-        # Net = 8 - 7 = +1 → avoid
+        # Bullish capped at 8
         assert result.bullish_score <= 8
         assert result.action in ("avoid", "watch")
 
@@ -1926,49 +1609,72 @@ class TestR12HighConcentration:
         assert "high_concentration" not in result.reasons
 
 
-class TestExtremeRugcheckGate:
-    """HG3: rugcheck > 20000 → hard avoid (Phase 46).
+class TestCleanOnlyGate:
+    """HG3: rugcheck > 1000 → hard avoid (Phase 48 clean-only filter).
 
-    Production: DATACLAW = 41 tokens/hr with rugcheck > 20000, all rugs.
+    Production backtest (129 positions):
+    - CLEAN (rc NULL/≤1000): 51 trades, 47.1% WR, PnL +$189.15
+    - DIRTY (rc >1000): 78 trades, 53.8% WR, PnL -$261.17
+    At $20/trade: CLEAN +$35.70, DIRTY -$262.36.
     """
 
-    def test_hg3_fires_above_15000(self):
-        """Phase 47: rugcheck_score > 15000 → extreme_rugcheck_gate.
-        Lowered from 20K to catch DATACLAW (rc=17550, $-20.31)."""
+    def test_hg3_fires_above_1000(self):
+        """rugcheck_score > 1000 → dirty_token_gate hard block."""
         snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, None, rugcheck_score=15001)
+        result = evaluate_signals(snapshot, None, rugcheck_score=1001)
         assert result.action == "avoid"
-        assert "extreme_rugcheck_gate" in result.reasons
+        assert "dirty_token_gate" in result.reasons
 
-    def test_hg3_not_fires_at_15000(self):
-        """rugcheck_score == 15000 → NOT blocked (boundary)."""
-        snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, None, rugcheck_score=15000)
-        assert "extreme_rugcheck_gate" not in result.reasons
-
-    def test_hg3_not_fires_below_15000(self):
-        """rugcheck_score < 15000 → NOT blocked."""
+    def test_hg3_fires_typical_pumpfun_migrated(self):
+        """Typical Raydium-migrated token rc=11500 → blocked."""
         snapshot = _make_snapshot()
         result = evaluate_signals(snapshot, None, rugcheck_score=11500)
-        assert "extreme_rugcheck_gate" not in result.reasons
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
+
+    def test_hg3_fires_extreme_scam(self):
+        """Extreme scam rc=25000 → still blocked by dirty_token_gate."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=25000)
+        assert result.action == "avoid"
+        assert "dirty_token_gate" in result.reasons
+
+    def test_hg3_not_fires_at_1000(self):
+        """rugcheck_score == 1000 → NOT blocked (boundary, > not >=)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=1000)
+        assert "dirty_token_gate" not in result.reasons
+
+    def test_hg3_not_fires_below_1000(self):
+        """rugcheck_score = 500 → clean token, passes."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=500)
+        assert "dirty_token_gate" not in result.reasons
 
     def test_hg3_not_fires_none(self):
-        """rugcheck_score is None → NOT blocked."""
+        """rugcheck_score is None → fresh pump.fun, passes (clean pattern)."""
         snapshot = _make_snapshot()
         result = evaluate_signals(snapshot, None, rugcheck_score=None)
-        assert "extreme_rugcheck_gate" not in result.reasons
+        assert "dirty_token_gate" not in result.reasons
+
+    def test_hg3_not_fires_zero(self):
+        """rugcheck_score = 0 → very clean, passes."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=0)
+        assert "dirty_token_gate" not in result.reasons
 
 
 class TestSingleHolderGate:
     """HG4: 'Single holder ownership' in rugcheck_risks → hard avoid (Phase 46)."""
 
     def test_hg4_fires_single_holder(self):
-        """'Single holder ownership' in risks → single_holder_gate."""
+        """'Single holder ownership' in risks → single_holder_gate.
+        Phase 48: use rc=800 (clean) so dirty_token_gate doesn't fire first."""
         snapshot = _make_snapshot()
         security = _make_security(
             rugcheck_risks="Single holder ownership risk, Low Liquidity",
         )
-        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        result = evaluate_signals(snapshot, security, rugcheck_score=800)
         assert result.action == "avoid"
         assert "single_holder_gate" in result.reasons
 
@@ -1978,7 +1684,7 @@ class TestSingleHolderGate:
         security = _make_security(
             rugcheck_risks="SINGLE HOLDER OWNERSHIP, Low Liquidity",
         )
-        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        result = evaluate_signals(snapshot, security, rugcheck_score=800)
         assert result.action == "avoid"
         assert "single_holder_gate" in result.reasons
 
@@ -1988,20 +1694,20 @@ class TestSingleHolderGate:
         security = _make_security(
             rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
         )
-        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        result = evaluate_signals(snapshot, security, rugcheck_score=800)
         assert "single_holder_gate" not in result.reasons
 
     def test_hg4_not_fires_none_risks(self):
         """rugcheck_risks is None → NOT blocked."""
         snapshot = _make_snapshot()
         security = _make_security(rugcheck_risks=None)
-        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        result = evaluate_signals(snapshot, security, rugcheck_score=800)
         assert "single_holder_gate" not in result.reasons
 
     def test_hg4_not_fires_no_security(self):
         """No security object → NOT blocked."""
         snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, None, rugcheck_score=5000)
+        result = evaluate_signals(snapshot, None, rugcheck_score=800)
         assert "single_holder_gate" not in result.reasons
 
 
@@ -2013,11 +1719,13 @@ class TestVelocityScamGate:
     """HG5: velocity scam gate — rugcheck >= 5000 + buys_5m >= 200 + liq < $30K.
 
     Real NIP: 1103 buys/5m, rugcheck 11400, liq $22K → -100% rug.
-    Backtest: catches ONLY Real NIP, zero false positives on 31 positions.
+    Phase 48: HG5 is now superseded by dirty_token_gate (rc > 1000).
+    All tokens with rc >= 5000 are already blocked by HG3.
+    These tests verify HG5 is unreachable (dirty_token_gate fires first).
     """
 
-    def test_hg5_fires_nip_pattern(self):
-        """Real NIP pattern: 1103 buys, rc=11400, liq=$22K."""
+    def test_hg5_superseded_by_dirty_gate(self):
+        """Phase 48: rc=11400 triggers dirty_token_gate before HG5."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("22774"),
             market_cap=Decimal("30000"),
@@ -2025,10 +1733,10 @@ class TestVelocityScamGate:
         )
         result = evaluate_signals(snapshot, None, rugcheck_score=11400)
         assert result.action == "avoid"
-        assert "velocity_scam_gate" in result.reasons
+        assert "dirty_token_gate" in result.reasons
 
-    def test_hg5_fires_at_threshold(self):
-        """Exact threshold: buys=200, rc=5000, liq=$29999."""
+    def test_hg5_superseded_at_boundary(self):
+        """Phase 48: rc=5000 triggers dirty_token_gate before HG5."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("29999"),
             market_cap=Decimal("50000"),
@@ -2036,40 +1744,10 @@ class TestVelocityScamGate:
         )
         result = evaluate_signals(snapshot, None, rugcheck_score=5000)
         assert result.action == "avoid"
-        assert "velocity_scam_gate" in result.reasons
-
-    def test_hg5_not_fires_low_buys(self):
-        """buys_5m < 200 → NOT blocked."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22000"),
-            market_cap=Decimal("30000"),
-            buys_5m=199,
-        )
-        result = evaluate_signals(snapshot, None, rugcheck_score=11400)
-        assert "velocity_scam_gate" not in result.reasons
-
-    def test_hg5_not_fires_low_rugcheck(self):
-        """rugcheck < 5000 → NOT blocked."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("22000"),
-            market_cap=Decimal("30000"),
-            buys_5m=500,
-        )
-        result = evaluate_signals(snapshot, None, rugcheck_score=4999)
-        assert "velocity_scam_gate" not in result.reasons
-
-    def test_hg5_not_fires_high_liq(self):
-        """liq >= $30K → NOT blocked (enough exit liquidity)."""
-        snapshot = _make_snapshot(
-            liquidity_usd=Decimal("30000"),
-            market_cap=Decimal("50000"),
-            buys_5m=500,
-        )
-        result = evaluate_signals(snapshot, None, rugcheck_score=11400)
-        assert "velocity_scam_gate" not in result.reasons
+        assert "dirty_token_gate" in result.reasons
 
     def test_hg5_not_fires_no_rugcheck(self):
-        """rugcheck is None → NOT blocked."""
+        """rugcheck is None → neither HG3 nor HG5 fires."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("22000"),
             market_cap=Decimal("30000"),
@@ -2077,3 +1755,4 @@ class TestVelocityScamGate:
         )
         result = evaluate_signals(snapshot, None, rugcheck_score=None)
         assert "velocity_scam_gate" not in result.reasons
+        assert "dirty_token_gate" not in result.reasons
