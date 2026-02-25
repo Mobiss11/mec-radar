@@ -1262,7 +1262,8 @@ class TestHolderConcentrationDanger:
     """
 
     def test_r70_fires_holder_risk_high_rugcheck_no_lp_unlocked(self):
-        """Classic rug pattern: high rugcheck + holder/ownership risk, no LP Unlocked."""
+        """Phase 46: rugcheck > 20000 now triggers extreme_rugcheck_gate hard block.
+        R70 holder_concentration_danger is superseded by HG3."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
@@ -1276,22 +1277,25 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=21000,
         )
-        assert "holder_concentration_danger" in result.reasons
+        # Hard gate fires before R70 can trigger
+        assert result.action == "avoid"
+        assert "extreme_rugcheck_gate" in result.reasons
 
     def test_r70_weight_is_minus_4(self):
-        """R70 penalty is -4 (soft, not fatal)."""
+        """Phase 46: rugcheck > 20000 now triggers hard gate. R70 only fires for < 20000.
+        Test with rugcheck=19999 to verify R70 still works below threshold."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
             holders_count=80,
         )
         security = _make_security(
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=22000,
+            rugcheck_score=20000,
         )
         r70_rules = [r for r in result.rules_fired if r.name == "holder_concentration_danger"]
         assert len(r70_rules) == 1
@@ -1299,7 +1303,7 @@ class TestHolderConcentrationDanger:
 
     def test_r70_safe_with_lp_unlocked(self):
         """LP Unlocked present = PumpFun standard. 100% win rate at high rugcheck.
-        R70 must NOT fire when LP Unlocked is in rugcheck_risks."""
+        Phase 46: rugcheck > 20000 triggers hard gate regardless of LP Unlocked."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
@@ -1313,10 +1317,13 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=21000,
         )
-        assert "holder_concentration_danger" not in result.reasons
+        # Hard gate fires for rugcheck > 20000 regardless
+        assert result.action == "avoid"
+        assert "extreme_rugcheck_gate" in result.reasons
 
     def test_r70_safe_low_rugcheck(self):
-        """rugcheck_score < 20000 → R70 does NOT fire even with holder risks."""
+        """rugcheck_score < 20000 → R70 does NOT fire even with holder risks.
+        Phase 46: single_holder_gate fires for 'single holder ownership'."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
@@ -1330,10 +1337,12 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=15000,
         )
-        assert "holder_concentration_danger" not in result.reasons
+        # Phase 46: single_holder_gate fires for "single holder ownership"
+        assert result.action == "avoid"
+        assert "single_holder_gate" in result.reasons
 
     def test_r70_safe_no_holder_risk_keywords(self):
-        """High rugcheck but no holder/ownership keywords → R70 does NOT fire."""
+        """High rugcheck but no holder/ownership keywords → HG3 still fires (Phase 46)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
@@ -1347,10 +1356,12 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=25000,
         )
-        assert "holder_concentration_danger" not in result.reasons
+        # Phase 46: extreme_rugcheck_gate fires for rugcheck > 20000
+        assert result.action == "avoid"
+        assert "extreme_rugcheck_gate" in result.reasons
 
     def test_r70_safe_no_security(self):
-        """No security object → R70 does NOT fire."""
+        """No security object → HG3 still fires for rugcheck > 20000 (Phase 46)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
@@ -1360,10 +1371,12 @@ class TestHolderConcentrationDanger:
             snapshot, None,
             rugcheck_score=25000,
         )
-        assert "holder_concentration_danger" not in result.reasons
+        # Phase 46: extreme_rugcheck_gate fires for rugcheck > 20000
+        assert result.action == "avoid"
+        assert "extreme_rugcheck_gate" in result.reasons
 
     def test_r70_safe_no_rugcheck_risks(self):
-        """Security exists but rugcheck_risks is None → R70 does NOT fire."""
+        """Security exists but rugcheck_risks is None → HG3 still fires (Phase 46)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
@@ -1414,66 +1427,66 @@ class TestHolderConcentrationDanger:
         assert "holder_concentration_danger" not in result.reasons
 
     def test_r70_ownership_keyword_variant(self):
-        """'ownership' keyword also triggers R70 (not just 'holder')."""
+        """Phase 46: rugcheck > 20000 → hard gate. Test R70 with score=20000 (at threshold)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             rugcheck_risks="Single ownership concentration, Low Liquidity",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=22000,
+            rugcheck_score=20000,
         )
         assert "holder_concentration_danger" in result.reasons
 
     def test_r70_case_insensitive(self):
-        """Risk string matching is case-insensitive."""
+        """Risk string matching is case-insensitive. Use rugcheck=20000 (at threshold, not above)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             rugcheck_risks="TOP 10 HOLDERS HIGH OWNERSHIP, LOW LIQUIDITY",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=22000,
+            rugcheck_score=20000,
         )
         assert "holder_concentration_danger" in result.reasons
 
     def test_r70_lp_unlocked_case_insensitive(self):
-        """LP Unlocked exemption is case-insensitive."""
+        """LP Unlocked exemption is case-insensitive. Use rugcheck=20000 (at threshold)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             rugcheck_risks="lp unlocked, top 10 holders high ownership",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=22000,
+            rugcheck_score=20000,
         )
         assert "holder_concentration_danger" not in result.reasons
 
     def test_r70_as_compound_scam_flag(self):
-        """R70 pattern also adds to compound scam flags in R61.
-        If holder_concentration + 2 other flags = 3 → compound_scam_fingerprint (hard avoid)."""
+        """Phase 46: rugcheck > 20000 → hard gate fires first.
+        Test compound with rugcheck=20000 (at threshold) to verify compound still works."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
             is_mintable=True,      # compound flag: mintable
             lp_burned=False,       # compound flag: LP_unsecured
@@ -1481,7 +1494,7 @@ class TestHolderConcentrationDanger:
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             bundled_buy_detected=True,  # compound flag: bundled_buy
             raydium_lp_burned=False,    # needed for LP_unsecured flag
         )
@@ -1490,14 +1503,15 @@ class TestHolderConcentrationDanger:
         assert "compound_scam_fingerprint" in result.reasons
 
     def test_r70_compound_flag_not_added_with_lp_unlocked(self):
-        """Holder concentration compound flag does NOT fire when LP Unlocked present."""
+        """Holder concentration compound flag does NOT fire when LP Unlocked present.
+        Use rugcheck=20000 (at threshold, not above hard gate)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             rugcheck_risks="Large Amount of LP Unlocked, Top 10 holders high ownership",
             is_mintable=True,
             lp_burned=False,
@@ -1505,7 +1519,7 @@ class TestHolderConcentrationDanger:
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=22000,
+            rugcheck_score=20000,
             bundled_buy_detected=True,
             raydium_lp_burned=False,
         )
@@ -1909,3 +1923,155 @@ class TestR12HighConcentration:
         snapshot = _make_snapshot(top10_holders_pct=Decimal("40"))
         result = evaluate_signals(snapshot, None, rugcheck_score=200)
         assert "high_concentration" not in result.reasons
+
+
+class TestExtremeRugcheckGate:
+    """HG3: rugcheck > 20000 → hard avoid (Phase 46).
+
+    Production: DATACLAW = 41 tokens/hr with rugcheck > 20000, all rugs.
+    """
+
+    def test_hg3_fires_above_20000(self):
+        """rugcheck_score > 20000 → extreme_rugcheck_gate."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=20001)
+        assert result.action == "avoid"
+        assert "extreme_rugcheck_gate" in result.reasons
+
+    def test_hg3_not_fires_at_20000(self):
+        """rugcheck_score == 20000 → NOT blocked (boundary)."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=20000)
+        assert "extreme_rugcheck_gate" not in result.reasons
+
+    def test_hg3_not_fires_below_20000(self):
+        """rugcheck_score < 20000 → NOT blocked."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=15000)
+        assert "extreme_rugcheck_gate" not in result.reasons
+
+    def test_hg3_not_fires_none(self):
+        """rugcheck_score is None → NOT blocked."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=None)
+        assert "extreme_rugcheck_gate" not in result.reasons
+
+
+class TestSingleHolderGate:
+    """HG4: 'Single holder ownership' in rugcheck_risks → hard avoid (Phase 46)."""
+
+    def test_hg4_fires_single_holder(self):
+        """'Single holder ownership' in risks → single_holder_gate."""
+        snapshot = _make_snapshot()
+        security = _make_security(
+            rugcheck_risks="Single holder ownership risk, Low Liquidity",
+        )
+        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        assert result.action == "avoid"
+        assert "single_holder_gate" in result.reasons
+
+    def test_hg4_case_insensitive(self):
+        """Matching is case-insensitive."""
+        snapshot = _make_snapshot()
+        security = _make_security(
+            rugcheck_risks="SINGLE HOLDER OWNERSHIP, Low Liquidity",
+        )
+        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        assert result.action == "avoid"
+        assert "single_holder_gate" in result.reasons
+
+    def test_hg4_not_fires_without_keyword(self):
+        """No 'single holder ownership' → NOT blocked."""
+        snapshot = _make_snapshot()
+        security = _make_security(
+            rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
+        )
+        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        assert "single_holder_gate" not in result.reasons
+
+    def test_hg4_not_fires_none_risks(self):
+        """rugcheck_risks is None → NOT blocked."""
+        snapshot = _make_snapshot()
+        security = _make_security(rugcheck_risks=None)
+        result = evaluate_signals(snapshot, security, rugcheck_score=5000)
+        assert "single_holder_gate" not in result.reasons
+
+    def test_hg4_not_fires_no_security(self):
+        """No security object → NOT blocked."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=5000)
+        assert "single_holder_gate" not in result.reasons
+
+
+    # TestDuplicateSymbolGate REMOVED: HG5 had too many false positives in backtest.
+    # Blocked $157 profits vs $84 losses — net negative. See Phase 46 notes.
+
+
+class TestVelocityScamGate:
+    """HG5: velocity scam gate — rugcheck >= 5000 + buys_5m >= 200 + liq < $30K.
+
+    Real NIP: 1103 buys/5m, rugcheck 11400, liq $22K → -100% rug.
+    Backtest: catches ONLY Real NIP, zero false positives on 31 positions.
+    """
+
+    def test_hg5_fires_nip_pattern(self):
+        """Real NIP pattern: 1103 buys, rc=11400, liq=$22K."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("22774"),
+            market_cap=Decimal("30000"),
+            buys_5m=1103,
+        )
+        result = evaluate_signals(snapshot, None, rugcheck_score=11400)
+        assert result.action == "avoid"
+        assert "velocity_scam_gate" in result.reasons
+
+    def test_hg5_fires_at_threshold(self):
+        """Exact threshold: buys=200, rc=5000, liq=$29999."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("29999"),
+            market_cap=Decimal("50000"),
+            buys_5m=200,
+        )
+        result = evaluate_signals(snapshot, None, rugcheck_score=5000)
+        assert result.action == "avoid"
+        assert "velocity_scam_gate" in result.reasons
+
+    def test_hg5_not_fires_low_buys(self):
+        """buys_5m < 200 → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("22000"),
+            market_cap=Decimal("30000"),
+            buys_5m=199,
+        )
+        result = evaluate_signals(snapshot, None, rugcheck_score=11400)
+        assert "velocity_scam_gate" not in result.reasons
+
+    def test_hg5_not_fires_low_rugcheck(self):
+        """rugcheck < 5000 → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("22000"),
+            market_cap=Decimal("30000"),
+            buys_5m=500,
+        )
+        result = evaluate_signals(snapshot, None, rugcheck_score=4999)
+        assert "velocity_scam_gate" not in result.reasons
+
+    def test_hg5_not_fires_high_liq(self):
+        """liq >= $30K → NOT blocked (enough exit liquidity)."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("30000"),
+            market_cap=Decimal("50000"),
+            buys_5m=500,
+        )
+        result = evaluate_signals(snapshot, None, rugcheck_score=11400)
+        assert "velocity_scam_gate" not in result.reasons
+
+    def test_hg5_not_fires_no_rugcheck(self):
+        """rugcheck is None → NOT blocked."""
+        snapshot = _make_snapshot(
+            liquidity_usd=Decimal("22000"),
+            market_cap=Decimal("30000"),
+            buys_5m=500,
+        )
+        result = evaluate_signals(snapshot, None, rugcheck_score=None)
+        assert "velocity_scam_gate" not in result.reasons

@@ -35,6 +35,27 @@ _RUGGED_SYMBOLS_REDIS_KEY = "antiscam:rugged_symbols"  # Redis hash: symbol -> "
 # Prevents inflating rug_count on re-enrichment of the same token.
 _OUTCOME_RUG_TRACKED: set[int] = set()
 
+# Phase 46: Duplicate symbol frequency tracker — detects mass deployment scams.
+# DATACLAW = 41 tokens/hr with same symbol. All rugs. Block at 5+ per hour.
+# Tracks (symbol_upper -> list of monotonic timestamps within last hour).
+_SYMBOL_SEEN_TIMES: dict[str, list[float]] = {}
+_SYMBOL_FREQ_WINDOW = 3600  # 1 hour
+
+
+def _track_symbol_seen(symbol: str) -> int:
+    """Track symbol appearance, return count within the last hour."""
+    if not symbol:
+        return 0
+    sym = symbol.upper()
+    now = _time_mod.monotonic()
+    times = _SYMBOL_SEEN_TIMES.get(sym, [])
+    # Prune old entries outside window
+    cutoff = now - _SYMBOL_FREQ_WINDOW
+    times = [t for t in times if t > cutoff]
+    times.append(now)
+    _SYMBOL_SEEN_TIMES[sym] = times
+    return len(times)
+
 
 def _get_copycat_ttl(count: int) -> int:
     """Phase 35/44: Count-dependent TTL — serial scam symbols tracked longer.
@@ -3274,6 +3295,14 @@ async def _enrich_token(
                         f"(count={_copycat_rug_count})"
                     )
 
+                # Phase 46: Track symbol frequency for duplicate symbol detection
+                _symbol_freq_1h = _track_symbol_seen(token.symbol or "")
+                if _symbol_freq_1h >= 5:
+                    logger.info(
+                        f"[DUPE_SYMBOL] {token.symbol} seen {_symbol_freq_1h}x "
+                        f"in last hour — mass deployment"
+                    )
+
                 sig = evaluate_signals(
                     snapshot,
                     security_data_for_signal,
@@ -3323,6 +3352,8 @@ async def _enrich_token(
                     # Phase 33/34 — anti-scam v2/v3
                     copycat_rugged=_copycat_rugged,
                     copycat_rug_count=_copycat_rug_count,
+                    # Phase 46 — duplicate symbol detection
+                    symbol_frequency_1h=_symbol_freq_1h,
                 )
                 logger.info(
                     f"[SIGNAL] {token.symbol or task.address[:12]} "

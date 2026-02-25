@@ -84,6 +84,18 @@ def compute_score_v3(
     if jupiter_banned:
         return 0
 
+    # Hard disqualifier — extreme rugcheck score (DATACLAW, NIP pattern)
+    if rugcheck_score is not None and rugcheck_score > 20000:
+        return 0
+
+    # Hard disqualifier — single holder ownership (100% rug rate)
+    if (
+        security is not None
+        and security.rugcheck_risks
+        and "single holder ownership" in security.rugcheck_risks.lower()
+    ):
+        return 0
+
     score = 0
     liquidity = float(liquidity_usd)
     holders = snapshot.holders_count or 0

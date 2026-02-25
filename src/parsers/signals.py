@@ -85,6 +85,8 @@ def evaluate_signals(
     # Phase 33/34 — anti-scam v2/v3
     copycat_rugged: bool = False,
     copycat_rug_count: int = 0,
+    # Phase 46 — duplicate symbol detection
+    symbol_frequency_1h: int = 0,
 ) -> SignalResult:
     """Evaluate all signal rules against enriched data.
 
@@ -137,6 +139,70 @@ def evaluate_signals(
             action="avoid",
             reasons={gate_rule.name: gate_rule.description},
         )
+
+    # HG3: Extreme rugcheck score — DATACLAW (41 tokens/hr, all rugs), NIP pattern.
+    # Production: rugcheck > 20000 = 100% rug rate. Zero profitable tokens.
+    if rugcheck_score is not None and rugcheck_score > 20000:
+        gate_rule = SignalRule(
+            "extreme_rugcheck_gate", -10,
+            f"Hard gate: rugcheck score {rugcheck_score} > 20000 (extreme scam)",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
+
+    # HG4: Single holder ownership — one wallet holds majority of supply.
+    # Production: 100% rug rate. Always a scam when combined with any risk.
+    if (
+        security is not None
+        and security.rugcheck_risks
+        and "single holder ownership" in security.rugcheck_risks.lower()
+    ):
+        gate_rule = SignalRule(
+            "single_holder_gate", -10,
+            "Hard gate: single holder ownership (one wallet controls supply)",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
+
+    # HG5: Velocity scam gate — bot-farmed buys + high rugcheck + thin liquidity.
+    # Real NIP: 1103 buys/5m, rugcheck 11400, liq $22K → -100% rug.
+    # Backtest: catches ONLY Real NIP (-$20.37), zero false positives.
+    # Bots nuke 200+ buys in 5 min to fake organic growth on scam tokens.
+    buys_5m_val = snapshot.buys_5m or 0
+    if (
+        rugcheck_score is not None
+        and rugcheck_score >= 5000
+        and buys_5m_val >= 200
+        and liq < 30_000
+    ):
+        gate_rule = SignalRule(
+            "velocity_scam_gate", -10,
+            f"Hard gate: velocity scam — {buys_5m_val} buys/5m + "
+            f"rugcheck {rugcheck_score} + liq ${liq:,.0f}",
+        )
+        return SignalResult(
+            rules_fired=[gate_rule],
+            bullish_score=0,
+            bearish_score=10,
+            net_score=-10,
+            action="avoid",
+            reasons={gate_rule.name: gate_rule.description},
+        )
+
+    # HG5-old REMOVED: Duplicate symbol frequency gate (5+/hr) had too many false positives.
+    # Backtest: blocked $157 profits vs $84 losses — net negative.
 
     # HG3 REMOVED: holders <= 2 hard gate had false positives in production
     # (Golem +145%, PolyClaw +137%, SIXCODES +101.6% — all had 1-2 holders).
