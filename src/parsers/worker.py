@@ -738,6 +738,7 @@ async def run_parser() -> None:
                     stagnation_timeout_min=settings.real_stagnation_timeout_min,
                     stagnation_max_pnl_pct=settings.real_stagnation_max_pnl_pct,
                     alert_dispatcher=alert_dispatcher,
+                    rugcheck_client=rugcheck,
                 )
                 logger.info(f"[REAL] Real trading enabled. Wallet: {wallet.pubkey_str}")
         except Exception as e:

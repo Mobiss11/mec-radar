@@ -29,6 +29,7 @@ from src.trading.wallet import SolanaWallet
 
 if TYPE_CHECKING:
     from src.parsers.alerts import AlertDispatcher
+    from src.parsers.rugcheck.client import RugcheckClient
 
 
 class RealTrader:
@@ -51,6 +52,8 @@ class RealTrader:
         stagnation_timeout_min: float = 25.0,
         stagnation_max_pnl_pct: float = 15.0,
         alert_dispatcher: AlertDispatcher | None = None,
+        rugcheck_client: RugcheckClient | None = None,
+        rugcheck_recheck_threshold: int = 15000,
     ) -> None:
         self._wallet = wallet
         self._swap = swap_client
@@ -66,6 +69,8 @@ class RealTrader:
         self._stagnation_timeout_min = stagnation_timeout_min
         self._stagnation_max_pnl_pct = stagnation_max_pnl_pct
         self._alerts = alert_dispatcher
+        self._rugcheck = rugcheck_client
+        self._rugcheck_recheck_threshold = rugcheck_recheck_threshold
         # Track consecutive sell failures per position for auto force-close
         self._sell_fail_count: dict[int, int] = {}
         # Max sell attempts before force-closing position as total loss
@@ -147,6 +152,30 @@ class RealTrader:
         if not allowed:
             logger.info(f"[REAL] Risk check blocked: {reason}")
             return None
+
+        # Rugcheck recheck — fresh API call right before buying.
+        # Production backtest: catches 4 scams where rugcheck score grew from
+        # 3501-11500 (at signal time) to 25000+ (seconds later).
+        # Saves $11.30 in losses with only $2.94 missed profits.
+        if self._rugcheck is not None:
+            try:
+                recheck = await self._rugcheck.get_token_report(signal.token_address)
+                if recheck is not None and recheck.score > self._rugcheck_recheck_threshold:
+                    _risks_str = ", ".join(r.name for r in recheck.risks[:5])
+                    logger.warning(
+                        f"[REAL] Rugcheck recheck BLOCKED {signal.token_address[:12]}: "
+                        f"score {recheck.score} > {self._rugcheck_recheck_threshold} "
+                        f"(risks: {_risks_str})"
+                    )
+                    return None
+                if recheck is not None:
+                    logger.info(
+                        f"[REAL] Rugcheck recheck OK for {signal.token_address[:12]}: "
+                        f"score={recheck.score}"
+                    )
+            except Exception as e:
+                # Non-fatal: if recheck fails, proceed with trade (don't block on API errors)
+                logger.warning(f"[REAL] Rugcheck recheck error (proceeding): {e}")
 
         # Execute buy swap
         sol_lamports = int(invest_sol * LAMPORTS_PER_SOL)

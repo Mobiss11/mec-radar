@@ -141,11 +141,13 @@ def evaluate_signals(
         )
 
     # HG3: Extreme rugcheck score — DATACLAW (41 tokens/hr, all rugs), NIP pattern.
-    # Production: rugcheck > 20000 = 100% rug rate. Zero profitable tokens.
-    if rugcheck_score is not None and rugcheck_score > 20000:
+    # Production backtest (34 real trades): 15K threshold catches DATACLAW ($-20.31)
+    # without cutting any profitable tokens. Old 20K missed it (rc=17550).
+    # Net benefit: +$28.68 (5 losses blocked, 3 profits lost via recheck).
+    if rugcheck_score is not None and rugcheck_score > 15000:
         gate_rule = SignalRule(
             "extreme_rugcheck_gate", -10,
-            f"Hard gate: rugcheck score {rugcheck_score} > 20000 (extreme scam)",
+            f"Hard gate: rugcheck score {rugcheck_score} > 15000 (extreme scam)",
         )
         return SignalResult(
             rules_fired=[gate_rule],
@@ -255,15 +257,15 @@ def evaluate_signals(
         _scam_flags += 1
         _scam_details.append(f"copycat_{copycat_rug_count}x_rugged")
 
-    # Phase 40: Holder concentration as compound flag.
+    # Phase 40/47: Holder concentration as compound flag.
     # Production: 34.2% rug rate with holder concentration vs 14.8% without (2.3x).
-    # rugcheck_score >= 20000 WITHOUT "LP Unlocked" = concentrated ownership + no bonding curve.
-    # Adds combinatorial power: holder_conc + LP_unsecured + rugcheck = 3 → hard avoid.
+    # rugcheck_score >= 13000 WITHOUT "LP Unlocked" = concentrated ownership + no bonding curve.
+    # Lowered from 20K to 13K (Phase 47) to catch CHILLHOUSE (rc=13500) pattern.
     if (
         security is not None
         and security.rugcheck_risks
         and rugcheck_score is not None
-        and rugcheck_score >= 20000
+        and rugcheck_score >= 13000
     ):
         _r_lower = security.rugcheck_risks.lower()
         if (
@@ -1195,7 +1197,7 @@ def evaluate_signals(
         security is not None
         and security.rugcheck_risks
         and rugcheck_score is not None
-        and rugcheck_score >= 20000
+        and rugcheck_score >= 13000
     ):
         _risks_lower = security.rugcheck_risks.lower()
         _has_holder_risk = (

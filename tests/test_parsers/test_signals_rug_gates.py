@@ -1281,9 +1281,10 @@ class TestHolderConcentrationDanger:
         assert result.action == "avoid"
         assert "extreme_rugcheck_gate" in result.reasons
 
-    def test_r70_weight_is_minus_4(self):
-        """Phase 46: rugcheck > 20000 now triggers hard gate. R70 only fires for < 20000.
-        Test with rugcheck=19999 to verify R70 still works below threshold."""
+    def test_r70_unreachable_after_hg3_lowered(self):
+        """Phase 47: HG3 threshold lowered to 15K. R70 requires >= 20000 which is
+        above HG3 threshold, so R70 is now unreachable (HG3 hard-blocks first).
+        Verify that rugcheck >= 20000 hits HG3, not R70."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
@@ -1297,9 +1298,9 @@ class TestHolderConcentrationDanger:
             snapshot, security,
             rugcheck_score=20000,
         )
-        r70_rules = [r for r in result.rules_fired if r.name == "holder_concentration_danger"]
-        assert len(r70_rules) == 1
-        assert r70_rules[0].weight == -4
+        # HG3 hard gate fires at > 15000, blocking R70
+        assert result.action == "avoid"
+        assert "extreme_rugcheck_gate" in result.reasons
 
     def test_r70_safe_with_lp_unlocked(self):
         """LP Unlocked present = PumpFun standard. 100% win rate at high rugcheck.
@@ -1392,101 +1393,101 @@ class TestHolderConcentrationDanger:
         )
         assert "holder_concentration_danger" not in result.reasons
 
-    def test_r70_boundary_rugcheck_exactly_20000(self):
-        """Exact boundary: rugcheck_score=20000 + holder risk + no LP Unlocked → fires."""
+    def test_r70_boundary_rugcheck_exactly_13000(self):
+        """Phase 47: Exact boundary: rugcheck_score=13000 + holder risk + no LP Unlocked → fires.
+        R70 threshold lowered from 20K to 13K to catch CHILLHOUSE (rc=13500) pattern."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
             holders_count=80,
         )
         security = _make_security(
-            rugcheck_score=20000,
+            rugcheck_score=13000,
             rugcheck_risks="Top 10 holders high ownership",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=20000,
+            rugcheck_score=13000,
         )
         assert "holder_concentration_danger" in result.reasons
 
-    def test_r70_boundary_rugcheck_19999(self):
-        """Just below boundary: rugcheck_score=19999 → R70 does NOT fire."""
+    def test_r70_boundary_rugcheck_12999(self):
+        """Just below boundary: rugcheck_score=12999 → R70 does NOT fire."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("20000"),
             market_cap=Decimal("40000"),
             holders_count=80,
         )
         security = _make_security(
-            rugcheck_score=19999,
+            rugcheck_score=12999,
             rugcheck_risks="Top 10 holders high ownership",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=19999,
+            rugcheck_score=12999,
         )
         assert "holder_concentration_danger" not in result.reasons
 
     def test_r70_ownership_keyword_variant(self):
-        """Phase 46: rugcheck > 20000 → hard gate. Test R70 with score=20000 (at threshold)."""
+        """Phase 47: R70 threshold lowered to 13K. Test with score=14000 (between R70 and HG3)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             rugcheck_risks="Single ownership concentration, Low Liquidity",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=20000,
+            rugcheck_score=14000,
         )
         assert "holder_concentration_danger" in result.reasons
 
     def test_r70_case_insensitive(self):
-        """Risk string matching is case-insensitive. Use rugcheck=20000 (at threshold, not above)."""
+        """Risk string matching is case-insensitive. Use rugcheck=14000 (between R70 13K and HG3 15K)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             rugcheck_risks="TOP 10 HOLDERS HIGH OWNERSHIP, LOW LIQUIDITY",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=20000,
+            rugcheck_score=14000,
         )
         assert "holder_concentration_danger" in result.reasons
 
     def test_r70_lp_unlocked_case_insensitive(self):
-        """LP Unlocked exemption is case-insensitive. Use rugcheck=20000 (at threshold)."""
+        """LP Unlocked exemption is case-insensitive. Use rugcheck=14000 (between R70 and HG3)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             rugcheck_risks="lp unlocked, top 10 holders high ownership",
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=20000,
+            rugcheck_score=14000,
         )
         assert "holder_concentration_danger" not in result.reasons
 
     def test_r70_as_compound_scam_flag(self):
-        """Phase 46: rugcheck > 20000 → hard gate fires first.
-        Test compound with rugcheck=20000 (at threshold) to verify compound still works."""
+        """Phase 47: Test compound with rugcheck=14000 (between R70 13K and HG3 15K)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             rugcheck_risks="Top 10 holders high ownership, Low Liquidity",
             is_mintable=True,      # compound flag: mintable
             lp_burned=False,       # compound flag: LP_unsecured
@@ -1494,7 +1495,7 @@ class TestHolderConcentrationDanger:
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             bundled_buy_detected=True,  # compound flag: bundled_buy
             raydium_lp_burned=False,    # needed for LP_unsecured flag
         )
@@ -1504,14 +1505,14 @@ class TestHolderConcentrationDanger:
 
     def test_r70_compound_flag_not_added_with_lp_unlocked(self):
         """Holder concentration compound flag does NOT fire when LP Unlocked present.
-        Use rugcheck=20000 (at threshold, not above hard gate)."""
+        Use rugcheck=14000 (between R70 13K and HG3 15K)."""
         snapshot = _make_snapshot(
             liquidity_usd=Decimal("15000"),
             market_cap=Decimal("30000"),
             holders_count=50,
         )
         security = _make_security(
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             rugcheck_risks="Large Amount of LP Unlocked, Top 10 holders high ownership",
             is_mintable=True,
             lp_burned=False,
@@ -1519,7 +1520,7 @@ class TestHolderConcentrationDanger:
         )
         result = evaluate_signals(
             snapshot, security,
-            rugcheck_score=20000,
+            rugcheck_score=14000,
             bundled_buy_detected=True,
             raydium_lp_burned=False,
         )
@@ -1931,23 +1932,24 @@ class TestExtremeRugcheckGate:
     Production: DATACLAW = 41 tokens/hr with rugcheck > 20000, all rugs.
     """
 
-    def test_hg3_fires_above_20000(self):
-        """rugcheck_score > 20000 → extreme_rugcheck_gate."""
+    def test_hg3_fires_above_15000(self):
+        """Phase 47: rugcheck_score > 15000 → extreme_rugcheck_gate.
+        Lowered from 20K to catch DATACLAW (rc=17550, $-20.31)."""
         snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, None, rugcheck_score=20001)
+        result = evaluate_signals(snapshot, None, rugcheck_score=15001)
         assert result.action == "avoid"
         assert "extreme_rugcheck_gate" in result.reasons
 
-    def test_hg3_not_fires_at_20000(self):
-        """rugcheck_score == 20000 → NOT blocked (boundary)."""
-        snapshot = _make_snapshot()
-        result = evaluate_signals(snapshot, None, rugcheck_score=20000)
-        assert "extreme_rugcheck_gate" not in result.reasons
-
-    def test_hg3_not_fires_below_20000(self):
-        """rugcheck_score < 20000 → NOT blocked."""
+    def test_hg3_not_fires_at_15000(self):
+        """rugcheck_score == 15000 → NOT blocked (boundary)."""
         snapshot = _make_snapshot()
         result = evaluate_signals(snapshot, None, rugcheck_score=15000)
+        assert "extreme_rugcheck_gate" not in result.reasons
+
+    def test_hg3_not_fires_below_15000(self):
+        """rugcheck_score < 15000 → NOT blocked."""
+        snapshot = _make_snapshot()
+        result = evaluate_signals(snapshot, None, rugcheck_score=11500)
         assert "extreme_rugcheck_gate" not in result.reasons
 
     def test_hg3_not_fires_none(self):
