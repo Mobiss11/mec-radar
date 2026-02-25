@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     trading_enabled: bool = False
 
     # gmgn.ai
-    gmgn_parse_interval_sec: int = 2  # Aggressive 2s polling for faster discovery
+    gmgn_parse_interval_sec: int = 1  # Ultra-aggressive 1s polling for fastest discovery
     gmgn_max_rps: float = 5.0  # Raised for 5s polling with proxy pool
     gmgn_proxy_url: str = ""  # SOCKS5 or HTTP proxy for GMGN (rotating residential)
     gmgn_proxy_pool: str = ""  # Comma-separated proxy URLs for round-robin rotation
