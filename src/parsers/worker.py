@@ -3762,8 +3762,8 @@ async def _paper_price_loop(
 
     Uses Birdeye multi-price (primary), Jupiter batch (fallback),
     and DexScreener (fallback for pump.fun bonding curve tokens).
-    Runs every 15 seconds, fetches prices for all open positions in one batch call,
-    and triggers take_profit/stop_loss checks with fresh prices.
+    Adaptive interval: 2s for fresh positions (<120s), 5s for mature.
+    Fetches prices for all open positions in one batch call.
     """
     from sqlalchemy import select as sa_select
 
@@ -3773,7 +3773,7 @@ async def _paper_price_loop(
     await asyncio.sleep(10)  # Phase 35: was 30s — faster first check for new positions
 
     while True:
-        _interval = 15  # Default interval; overridden below for fresh positions
+        _interval = 5  # Default interval; overridden below for fresh positions
         try:
             async with async_session_factory() as session:
                 result = await session.execute(
@@ -3973,15 +3973,14 @@ async def _paper_price_loop(
                                 continue
                         await _track_rugged_symbol(pos.symbol)
 
-            # Phase 35: Adaptive interval — 5s for fresh positions (< 120s old),
-            # 15s for mature. Fresh positions have highest rug risk; faster checks
-            # catch instant rugs and capture profit before LP removal.
+            # Adaptive interval — 2s for fresh positions (< 120s old),
+            # 5s for mature. Birdeye batch = 1 call (~300ms), fits within 10 RPS budget.
             _has_fresh = any(
                 pos.opened_at and (_now_dt - pos.opened_at).total_seconds() < 120
                 for pos in positions
             )
             if _has_fresh:
-                _interval = 5
+                _interval = 2
 
         except Exception as e:
             logger.warning(f"[PAPER] Price loop error: {e}")
