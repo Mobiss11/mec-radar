@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.trading.copy_trader import CopySwap, CopyTrader
+from src.trading.copy_trader import STABLECOIN_MINTS, CopySwap, CopyTrader
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -215,6 +215,36 @@ class TestParseSwap:
         assert swap is not None
         assert swap.source_dex == "RAYDIUM"
 
+    def test_wsol_buy_detection(self) -> None:
+        """Pump.fun buys using WSOL should be detected correctly."""
+        trader = _make_trader()
+        tx = _make_helius_tx(
+            fee_payer=_WALLET,
+            fee=5000,
+            # Pump.fun: minimal native, main amount via WSOL
+            native_transfers=[
+                _native_xfer(_WALLET, "PoolABC", 10_000),  # just rent
+            ],
+            token_transfers=[
+                # WSOL sent (0.05 SOL)
+                _token_xfer(_WALLET, "PoolABC", _SOL_MINT, 0.05),
+                # Token received
+                _token_xfer("PoolABC", _WALLET, _TOKEN_MINT, 1000.0),
+            ],
+        )
+        swap = trader._parse_swap(_WALLET, _WALLET_CONFIG, tx)
+        assert swap is not None
+        assert swap.side == "buy"
+        assert swap.sol_amount > Decimal("0")
+
+    def test_stablecoin_mints_exist(self) -> None:
+        """Known stablecoin mints should be populated."""
+        assert len(STABLECOIN_MINTS) >= 5
+        # USDC
+        assert "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" in STABLECOIN_MINTS
+        # USD1
+        assert "USD1ZWsSqMGsCTmgg2LpPC6FicSfYaBobB4V8jXbpump" in STABLECOIN_MINTS
+
 
 # ── Callback tests ────────────────────────────────────────────────────────
 
@@ -223,11 +253,11 @@ class TestOnCopySwapDetected:
     """Test CopyTrader.on_copy_swap_detected() — full pipeline."""
 
     @pytest.mark.asyncio
-    async def test_skip_non_swap(self) -> None:
-        """Non-SWAP transactions should be skipped."""
+    async def test_skip_nft_type(self) -> None:
+        """NFT transactions should be skipped."""
         helius = AsyncMock()
         helius.get_parsed_transactions = AsyncMock(return_value=[
-            _make_helius_tx(tx_type="TRANSFER", fee_payer=_WALLET),
+            _make_helius_tx(tx_type="NFT_MINT", fee_payer=_WALLET),
         ])
         trader = _make_trader(helius_mock=helius)
         session = AsyncMock()
@@ -238,6 +268,24 @@ class TestOnCopySwapDetected:
             await trader.on_copy_swap_detected(_WALLET, "sig1", session)
 
         assert trader._skipped_non_swap == 1
+
+    @pytest.mark.asyncio
+    async def test_transfer_not_skipped(self) -> None:
+        """TRANSFER type should NOT be skipped (pump.fun buys are TRANSFER)."""
+        helius = AsyncMock()
+        helius.get_parsed_transactions = AsyncMock(return_value=[
+            _make_helius_tx(tx_type="TRANSFER", fee_payer=_WALLET),
+        ])
+        trader = _make_trader(helius_mock=helius)
+        session = AsyncMock()
+
+        with patch.object(trader, "_get_tracked_wallets", return_value={
+            _WALLET: _WALLET_CONFIG,
+        }):
+            await trader.on_copy_swap_detected(_WALLET, "sig1_transfer", session)
+
+        # TRANSFER passes type filter, but has no SOL flow so no swap parsed
+        assert trader._skipped_non_swap == 0
 
     @pytest.mark.asyncio
     async def test_skip_transaction_error(self) -> None:
@@ -347,7 +395,8 @@ class TestHandleBuy:
         )
         config = {**_WALLET_CONFIG, "multiplier": 1.0, "max_sol_per_trade": 0.05}
 
-        pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
+        with patch("src.parsers.sol_price.get_sol_price", return_value=140.0):
+            pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
         assert pos is not None
         assert pos.source == "copy_trade"
         assert pos.copied_from_wallet == _WALLET
@@ -380,7 +429,8 @@ class TestHandleBuy:
         )
         config = {"multiplier": 2.0, "max_sol_per_trade": 1.0, "enabled": True}
 
-        pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
+        with patch("src.parsers.sol_price.get_sol_price", return_value=140.0):
+            pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
         assert pos is not None
         # swap.sol * multiplier = 0.1 * 2.0 = 0.2, capped by max_sol_per_trade=1.0
         assert pos.amount_sol_invested == Decimal("0.2")
@@ -428,7 +478,8 @@ class TestHandleBuy:
         )
         config = _WALLET_CONFIG
 
-        pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
+        with patch("src.parsers.sol_price.get_sol_price", return_value=140.0):
+            pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
         assert pos is None
 
     @pytest.mark.asyncio
@@ -455,7 +506,8 @@ class TestHandleBuy:
         )
         config = _WALLET_CONFIG
 
-        pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
+        with patch("src.parsers.sol_price.get_sol_price", return_value=140.0):
+            pos = await trader._handle_buy(db_session, swap, config, is_paper=True)
         assert pos is not None
 
         # Verify token was created

@@ -765,6 +765,7 @@ async def run_parser() -> None:
 
             copy_trader = CopyTrader(
                 helius=helius,
+                birdeye=birdeye,
                 alert_dispatcher=alert_dispatcher,
                 redis=redis,
                 take_profit_x=settings.copy_trade_take_profit_x,

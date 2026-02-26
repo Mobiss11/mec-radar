@@ -33,9 +33,23 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
 
     from src.parsers.alerts import AlertDispatcher
+    from src.parsers.birdeye.client import BirdeyeClient
     from src.parsers.helius.client import HeliusClient
 
 SOL_MINT = "So11111111111111111111111111111111111111112"
+
+# Known stablecoin mints — skip these (no point copy-trading stablecoin buys)
+STABLECOIN_MINTS: set[str] = {
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+    "USD1ZWsSqMGsCTmgg2LpPC6FicSfYaBobB4V8jXbpump",  # USD1
+    "USDSwr9AiSQKFJGBmPsLRMqqYhUBbxhqzHgoK2PAMHP",  # USDS
+    "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",   # USDH
+    "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",  # stSOL
+    "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",   # mSOL
+    "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",   # bSOL
+    "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",  # jitoSOL
+}
 
 
 @dataclass
@@ -65,6 +79,7 @@ class CopyTrader:
         self,
         *,
         helius: HeliusClient,
+        birdeye: BirdeyeClient | None = None,
         alert_dispatcher: AlertDispatcher | None = None,
         redis: Redis | None = None,
         # Close condition params
@@ -83,6 +98,7 @@ class CopyTrader:
         dedup_ttl_sec: int = 300,
     ) -> None:
         self._helius = helius
+        self._birdeye = birdeye
         self._alerts = alert_dispatcher
         self._redis = redis
 
@@ -227,7 +243,12 @@ class CopyTrader:
 
         self._swaps_parsed += 1
 
-        # 6. Route
+        # 6. Skip stablecoins and wrapped SOL
+        if swap.token_mint in STABLECOIN_MINTS or swap.token_mint == SOL_MINT:
+            logger.debug(f"[COPY] Skip stablecoin/SOL: {swap.token_mint[:12]} sig={sig_short}")
+            return
+
+        # 7. Route
         settings = self._get_copy_settings()
         if swap.side == "buy":
             if settings.get("paper_mode"):
@@ -281,6 +302,12 @@ class CopyTrader:
         # Combine native + wrapped SOL
         total_sol_out = sol_out + wsol_out
         total_sol_in = sol_in + wsol_in
+
+        logger.debug(
+            f"[COPY] _parse_swap: native_out={sol_out} wsol_out={wsol_out} "
+            f"native_in={sol_in} wsol_in={wsol_in} fee={tx.fee} "
+            f"type={tx.type} source={getattr(tx, 'source', '?')}"
+        )
 
         # Non-SOL tokens received by wallet (= bought)
         tokens_received = [
@@ -380,28 +407,48 @@ class CopyTrader:
         invest_sol = min(swap.sol_amount * multiplier, max_sol)
         invest_sol = max(invest_sol, self._min_sol)
 
-        # Price from swap data (SOL per token → convert to USD)
-        # Helius gives native SOL amounts, but price loop uses Birdeye USD prices.
-        # We must store entry_price in USD to match current_price from price loop.
-        price_sol = Decimal("0")
-        if swap.token_amount and swap.token_amount > 0:
-            price_sol = swap.sol_amount / swap.token_amount
-        if price_sol <= 0:
+        # Price: use Birdeye USD price (reliable) with swap-calculated fallback.
+        # Swap data is unreliable for price calculation due to fee/WSOL edge cases.
+        price = Decimal("0")
+
+        # Primary: Birdeye get_price (USD, ~10 CU)
+        if self._birdeye:
+            try:
+                be_price = await asyncio.wait_for(
+                    self._birdeye.get_price(swap.token_mint),
+                    timeout=5.0,
+                )
+                if be_price and be_price.value and be_price.value > 0:
+                    price = be_price.value
+                    logger.debug(f"[COPY] Birdeye price for {swap.token_mint[:12]}: ${price}")
+            except Exception as e:
+                logger.debug(f"[COPY] Birdeye price failed: {e}")
+
+        # Fallback: calculate from swap data (SOL per token → USD)
+        if price <= 0:
+            from src.parsers.sol_price import get_sol_price
+
+            price_sol = Decimal("0")
+            if swap.token_amount and swap.token_amount > 0:
+                price_sol = swap.sol_amount / swap.token_amount
+            sol_usd = get_sol_price()
+            if price_sol > 0 and sol_usd and sol_usd > 0:
+                price = price_sol * Decimal(str(sol_usd))
+            elif price_sol > 0:
+                price = price_sol * Decimal("150")
+            logger.debug(
+                f"[COPY] Swap-calculated price for {swap.token_mint[:12]}: ${price} "
+                f"(sol_amount={swap.sol_amount}, token_amount={swap.token_amount})"
+            )
+
+        if price <= 0:
             logger.warning(f"[COPY] Zero price for {swap.token_mint[:12]}, skipping")
             return None
 
-        # Convert SOL price to USD
+        # Calculate token amount for our position (invest_sol in SOL → tokens at USD price)
         from src.parsers.sol_price import get_sol_price
-        sol_usd = get_sol_price()
-        if sol_usd and sol_usd > 0:
-            price = price_sol * Decimal(str(sol_usd))
-        else:
-            # Fallback: assume ~$150 SOL if price feed unavailable
-            price = price_sol * Decimal("150")
-            logger.debug(f"[COPY] SOL price unavailable, using $150 fallback")
-
-        # Calculate token amount for our position (use SOL price for amounts)
-        amount_token = invest_sol / price_sol if price_sol > 0 else Decimal("0")
+        _sol_usd = Decimal(str(get_sol_price() or 150))
+        amount_token = invest_sol * _sol_usd / price if price > 0 else Decimal("0")
 
         # TODO: For real mode, execute Jupiter buy swap here
         # For Phase 57 MVP, real mode creates paper-like records with is_paper=0
@@ -530,12 +577,15 @@ class CopyTrader:
         _sol_usd = Decimal(str(sol_price_usd)) if sol_price_usd else Decimal("150")
 
         for pos in positions:
-            # Price sanity check (same as PaperTrader)
+            # Price sanity check: skip obviously broken price data
             if pos.entry_price and pos.entry_price > 0:
                 price_ratio = float(current_price / pos.entry_price)
-                if price_ratio > 1000:
-                    continue
-                if current_price > Decimal("1"):
+                if price_ratio > 10000:
+                    # 10000x jump is almost certainly bad data
+                    logger.debug(
+                        f"[COPY] Skip price update: ratio={price_ratio:.0f}x "
+                        f"entry={pos.entry_price} curr={current_price}"
+                    )
                     continue
 
             pos.current_price = current_price
