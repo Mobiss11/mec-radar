@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Birdeye Data Services API (paid — $39/mo)
     birdeye_api_key: str = ""
-    birdeye_max_rps: float = 10.0
+    birdeye_max_rps: float = 15.0  # Phase 50: Starter plan = 15 RPS
 
     # Solana RPC (fallback if helius_rpc_url is empty)
     solana_rpc_url: str = ""

@@ -3802,10 +3802,10 @@ async def _paper_price_loop(
     from src.db.database import async_session_factory
     from src.models.trade import Position
 
-    await asyncio.sleep(10)  # Phase 35: was 30s — faster first check for new positions
+    await asyncio.sleep(5)  # Phase 50: was 10s — faster first check
 
     while True:
-        _interval = 5  # Default interval; overridden below for fresh positions
+        _interval = 2  # Phase 50: was 5s — faster monitoring for all positions
         try:
             async with async_session_factory() as session:
                 result = await session.execute(
@@ -4005,14 +4005,14 @@ async def _paper_price_loop(
                                 continue
                         await _track_rugged_symbol(pos.symbol)
 
-            # Adaptive interval — 2s for fresh positions (< 120s old),
-            # 5s for mature. Birdeye batch = 1 call (~300ms), fits within 10 RPS budget.
+            # Phase 50: Adaptive interval — 1s for fresh positions (< 120s old),
+            # 2s for mature. Birdeye batch = 1 call, fits within 15 RPS.
             _has_fresh = any(
                 pos.opened_at and (_now_dt - pos.opened_at).total_seconds() < 120
                 for pos in positions
             )
             if _has_fresh:
-                _interval = 2
+                _interval = 1
 
         except Exception as e:
             logger.warning(f"[PAPER] Price loop error: {e}")
