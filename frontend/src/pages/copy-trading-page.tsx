@@ -498,9 +498,9 @@ export function CopyTradingPage() {
                         REAL
                       </span>
                     )}
-                    {p.status === "closed" && p.close_reason && (
+                    {p.status === "closed" && typeof p.close_reason === "string" && (
                       <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                        {String(p.close_reason)}
+                        {p.close_reason}
                       </span>
                     )}
                   </div>
@@ -517,8 +517,8 @@ export function CopyTradingPage() {
                     <span title={p.opened_at ? String(p.opened_at) : ""}>
                       {formatDateMsk(p.opened_at as string)}
                     </span>
-                    {p.closed_at && (
-                      <span>→ {formatDateMsk(p.closed_at as string)}</span>
+                    {typeof p.closed_at === "string" && (
+                      <span>→ {formatDateMsk(p.closed_at)}</span>
                     )}
                     <span className="text-muted-foreground/50">
                       ({timeAgo((p.closed_at ?? p.opened_at) as string)})
