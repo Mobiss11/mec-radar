@@ -175,7 +175,10 @@ class RealTrader:
 
         # Rugcheck recheck — fresh API call right before buying.
         # Production: catches scams where rugcheck score grows between signal and buy.
-        # Phase 53: also blocks when recheck fails/returns None but DB has dangerous history.
+        # Phase 53: also blocks on specific dangerous risk names (e.g. "Creator history
+        # of rugged tokens" — the SUNNYEGG pattern where score=2661 is below threshold
+        # but the risk itself is a direct scam indicator).
+        _FATAL_RISKS = {"Creator history of rugged tokens"}
         if self._rugcheck is not None:
             try:
                 recheck = await self._rugcheck.get_token_report(signal.token_address)
@@ -187,6 +190,17 @@ class RealTrader:
                         f"(risks: {_risks_str})"
                     )
                     return None
+                # Phase 53: block on fatal risk names regardless of score
+                if recheck is not None:
+                    _fatal_found = [
+                        r.name for r in recheck.risks if r.name in _FATAL_RISKS
+                    ]
+                    if _fatal_found:
+                        logger.warning(
+                            f"[REAL] Rugcheck FATAL RISK blocked {signal.token_address[:12]}: "
+                            f"score={recheck.score}, fatal={_fatal_found}"
+                        )
+                        return None
                 if recheck is not None:
                     logger.info(
                         f"[REAL] Rugcheck recheck OK for {signal.token_address[:12]}: "
