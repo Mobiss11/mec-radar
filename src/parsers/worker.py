@@ -1997,7 +1997,11 @@ async def _enrich_token(
                 return 0
 
             async def _run_creator_analysis() -> tuple:
-                """Returns (creator_prof, funding_chain_risk, pumpfun_dead_tokens, bundled_buy)."""
+                """Returns (creator_prof, funding_chain_risk, pumpfun_dead_tokens, bundled_buy).
+
+                All 6 sub-checks run in parallel (Phase 52 optimization).
+                Results are merged via max(risk_score) at the end.
+                """
                 _creator_prof = None
                 _funding_risk: int | None = None
                 _pf_dead: int | None = None
@@ -2006,106 +2010,153 @@ async def _enrich_token(
                 if not token.creator_address:
                     return _creator_prof, _funding_risk, _pf_dead, _bundled
 
-                # Creator profiling
-                try:
-                    from src.parsers.creator_profiler import profile_creator
-                    _creator_prof = await profile_creator(session, token.creator_address)
-                except Exception as e:
-                    logger.debug(f"[ENRICH] Creator profiling failed: {e}")
+                # --- Define all 6 sub-checks as independent coroutines ---
 
-                # Creator risk assessment
-                try:
-                    cr_risk, _is_first = await assess_creator_risk(
-                        session, token.creator_address
-                    )
+                async def _creator_profiling():
+                    try:
+                        from src.parsers.creator_profiler import profile_creator
+                        return await profile_creator(session, token.creator_address)
+                    except Exception as e:
+                        logger.debug(f"[ENRICH] Creator profiling failed: {e}")
+                        return None
+
+                async def _creator_risk():
+                    try:
+                        return await assess_creator_risk(session, token.creator_address)
+                    except Exception as e:
+                        logger.debug(f"[ENRICH] Creator trace failed: {e}")
+                        return None
+
+                async def _funding_check():
+                    if not helius:
+                        return None
+                    try:
+                        from src.parsers.funding_trace import trace_creator_funding
+                        return await trace_creator_funding(
+                            session, helius, token.creator_address,
+                            max_hops=settings.funding_trace_max_hops,
+                        )
+                    except Exception as e:
+                        logger.debug(f"[ENRICH] Funding trace failed: {e}")
+                        return None
+
+                async def _repeat_launches():
+                    try:
+                        return await check_creator_recent_launches(
+                            session, token.creator_address
+                        )
+                    except Exception as e:
+                        logger.debug(f"[ENRICH] Creator repeat check failed: {e}")
+                        return None
+
+                async def _pumpfun_check():
+                    if not (pumpfun and token.source == "pumpportal"):
+                        return None
+                    try:
+                        return await pumpfun.get_creator_history(token.creator_address)
+                    except Exception as e:
+                        logger.debug(f"[ENRICH] Pump.fun history failed: {e}")
+                        return None
+
+                async def _bundled_check():
+                    if not helius:
+                        return None
+                    try:
+                        return await detect_bundled_buys(
+                            helius, task.address, token.creator_address
+                        )
+                    except Exception as e:
+                        logger.debug(f"[ENRICH] Bundled buy detection failed: {e}")
+                        return None
+
+                # --- Run all 6 in parallel ---
+                results = await asyncio.gather(
+                    _creator_profiling(),
+                    _creator_risk(),
+                    _funding_check(),
+                    _repeat_launches(),
+                    _pumpfun_check(),
+                    _bundled_check(),
+                    return_exceptions=True,
+                )
+
+                # Sanitize exceptions
+                prof_result = results[0] if not isinstance(results[0], BaseException) else None
+                risk_result = results[1] if not isinstance(results[1], BaseException) else None
+                funding_result = results[2] if not isinstance(results[2], BaseException) else None
+                activity_result = results[3] if not isinstance(results[3], BaseException) else None
+                pf_history = results[4] if not isinstance(results[4], BaseException) else None
+                bundled_result = results[5] if not isinstance(results[5], BaseException) else None
+
+                for i, r in enumerate(results):
+                    if isinstance(r, BaseException):
+                        logger.debug(f"[ENRICH] Creator sub-check {i} exception: {r}")
+
+                # --- Merge results: build creator_prof with max(risk_score) ---
+
+                # 1. Creator profiling — base profile
+                _creator_prof = prof_result
+                max_risk = _creator_prof.risk_score if _creator_prof and _creator_prof.risk_score else 0
+
+                # 2. Creator risk assessment
+                if risk_result is not None:
+                    cr_risk, _is_first = risk_result
                     if _creator_prof is None:
                         from src.models.token import CreatorProfile as _CP
                         _creator_prof = _CP(
                             address=token.creator_address, risk_score=cr_risk,
                         )
-                    elif (_creator_prof.risk_score or 0) < cr_risk:
-                        _creator_prof.risk_score = cr_risk
-                except Exception as e:
-                    logger.debug(f"[ENRICH] Creator trace failed: {e}")
+                    max_risk = max(max_risk, cr_risk)
 
-                # Funding trace (Helius, 3-hop)
-                if helius:
-                    try:
-                        from src.parsers.funding_trace import trace_creator_funding
-                        funding = await trace_creator_funding(
-                            session, helius, token.creator_address,
-                            max_hops=settings.funding_trace_max_hops,
-                        )
-                        if funding:
-                            _funding_risk = funding.funding_risk
-                            if funding.funding_risk > 30:
-                                logger.info(
-                                    f"[FUNDING] {token.symbol or task.address[:12]} "
-                                    f"creator funded by {funding.funder or 'unknown'} "
-                                    f"risk={funding.funding_risk} hops={funding.chain_depth} "
-                                    f"({funding.reason})"
-                                )
-                            if _creator_prof and (_creator_prof.risk_score or 0) < funding.funding_risk:
-                                _creator_prof.risk_score = funding.funding_risk
-                    except Exception as e:
-                        logger.debug(f"[ENRICH] Funding trace failed: {e}")
-
-                # Creator repeat launch check
-                try:
-                    activity = await check_creator_recent_launches(
-                        session, token.creator_address
-                    )
-                    if activity and activity.is_serial_launcher:
+                # 3. Funding trace
+                if funding_result is not None:
+                    _funding_risk = funding_result.funding_risk
+                    if funding_result.funding_risk > 30:
                         logger.info(
-                            f"[CREATOR] Serial launcher: {token.creator_address[:12]} "
-                            f"({activity.recent_launches} launches in 4h)"
+                            f"[FUNDING] {token.symbol or task.address[:12]} "
+                            f"creator funded by {funding_result.funder or 'unknown'} "
+                            f"risk={funding_result.funding_risk} hops={funding_result.chain_depth} "
+                            f"({funding_result.reason})"
                         )
-                        if _creator_prof:
-                            _creator_prof.risk_score = max(
-                                _creator_prof.risk_score or 0, activity.risk_boost,
-                            )
-                except Exception as e:
-                    logger.debug(f"[ENRICH] Creator repeat check failed: {e}")
+                    max_risk = max(max_risk, funding_result.funding_risk)
 
-                # Pump.fun creator history
-                if pumpfun and token.source == "pumpportal":
-                    try:
-                        pf_history = await pumpfun.get_creator_history(token.creator_address)
-                        if pf_history is not None:
-                            _pf_dead = pf_history.dead_token_count
-                            await update_creator_pumpfun(
-                                session, token.creator_address, pf_history.dead_token_count
-                            )
-                            if pf_history.risk_boost > 0 and _creator_prof:
-                                _creator_prof.risk_score = max(
-                                    _creator_prof.risk_score or 0, pf_history.risk_boost,
-                                )
-                            if pf_history.is_serial_scammer:
-                                logger.info(
-                                    f"[PUMPFUN] Serial scammer: {token.creator_address[:12]} "
-                                    f"({pf_history.dead_token_count} dead tokens)"
-                                )
-                    except Exception as e:
-                        logger.debug(f"[ENRICH] Pump.fun history failed: {e}")
+                # 4. Repeat launches
+                if activity_result is not None and activity_result.is_serial_launcher:
+                    logger.info(
+                        f"[CREATOR] Serial launcher: {token.creator_address[:12]} "
+                        f"({activity_result.recent_launches} launches in 4h)"
+                    )
+                    max_risk = max(max_risk, activity_result.risk_boost)
 
-                # Bundled buy detection (Helius)
-                if helius:
-                    try:
-                        bundled_result = await detect_bundled_buys(
-                            helius, task.address, token.creator_address
+                # 5. Pump.fun history
+                if pf_history is not None:
+                    _pf_dead = pf_history.dead_token_count
+                    await update_creator_pumpfun(
+                        session, token.creator_address, pf_history.dead_token_count
+                    )
+                    if pf_history.risk_boost > 0:
+                        max_risk = max(max_risk, pf_history.risk_boost)
+                    if pf_history.is_serial_scammer:
+                        logger.info(
+                            f"[PUMPFUN] Serial scammer: {token.creator_address[:12]} "
+                            f"({pf_history.dead_token_count} dead tokens)"
                         )
-                        if bundled_result is not None and bundled_result.is_bundled:
-                            _bundled = True
-                            await update_security_phase12(
-                                session, token.id, bundled_buy_detected=True,
-                            )
-                            logger.info(
-                                f"[BUNDLED] {token.symbol or task.address[:12]} "
-                                f"{bundled_result.funded_by_creator}/{bundled_result.first_block_buyers} "
-                                f"first-block buyers funded by creator"
-                            )
-                    except Exception as e:
-                        logger.debug(f"[ENRICH] Bundled buy detection failed: {e}")
+
+                # 6. Bundled buy detection
+                if bundled_result is not None and bundled_result.is_bundled:
+                    _bundled = True
+                    await update_security_phase12(
+                        session, token.id, bundled_buy_detected=True,
+                    )
+                    logger.info(
+                        f"[BUNDLED] {token.symbol or task.address[:12]} "
+                        f"{bundled_result.funded_by_creator}/{bundled_result.first_block_buyers} "
+                        f"first-block buyers funded by creator"
+                    )
+
+                # Apply max risk score to creator profile
+                if _creator_prof and max_risk > (_creator_prof.risk_score or 0):
+                    _creator_prof.risk_score = max_risk
 
                 return _creator_prof, _funding_risk, _pf_dead, _bundled
 
