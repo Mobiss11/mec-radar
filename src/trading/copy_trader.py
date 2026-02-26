@@ -165,26 +165,36 @@ class CopyTrader:
             logger.info(f"[COPY] Wallet disabled: {wallet_short}")
             return
 
-        # 3. Helius parse
-        try:
-            txs = await asyncio.wait_for(
-                self._helius.get_parsed_transactions([signature]),
-                timeout=10.0,
-            )
-        except TimeoutError:
-            logger.warning(f"[COPY] Helius timeout for {sig_short}")
-            self._errors += 1
-            return
-        except Exception as e:
-            logger.warning(f"[COPY] Helius error: {e}")
-            self._errors += 1
-            return
+        # 3. Helius parse with retry
+        # gRPC detects at PROCESSED commitment (~400ms), but Helius Enhanced API
+        # needs CONFIRMED (~5-30s). Retry up to 3 times with increasing delays.
+        tx = None
+        helius_delays = [2.0, 5.0, 10.0]  # seconds before each attempt
+        for attempt, delay in enumerate(helius_delays):
+            await asyncio.sleep(delay)
+            try:
+                txs = await asyncio.wait_for(
+                    self._helius.get_parsed_transactions([signature]),
+                    timeout=10.0,
+                )
+            except TimeoutError:
+                logger.warning(f"[COPY] Helius timeout for {sig_short} (attempt {attempt + 1})")
+                continue
+            except Exception as e:
+                logger.warning(f"[COPY] Helius error: {e} (attempt {attempt + 1})")
+                continue
 
-        if not txs:
-            logger.info(f"[COPY] Helius returned empty for {sig_short}")
-            return
+            if txs:
+                tx = txs[0]
+                if attempt > 0:
+                    logger.info(f"[COPY] Helius resolved on attempt {attempt + 1} for {sig_short}")
+                break
+            logger.debug(f"[COPY] Helius empty attempt {attempt + 1} for {sig_short}")
 
-        tx = txs[0]
+        if tx is None:
+            self._errors += 1
+            logger.warning(f"[COPY] Helius returned empty after 3 attempts for {sig_short}")
+            return
 
         # 4. Validate: must be SWAP, no error, fee_payer matches wallet
         if tx.type != "SWAP":
