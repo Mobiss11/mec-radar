@@ -140,6 +140,10 @@ class CopyTrader:
         3. Route to _handle_buy or _handle_sell
         """
         self._events_received += 1
+        sig_short = signature[:16]
+        wallet_short = wallet_address[:12]
+
+        logger.info(f"[COPY] Event #{self._events_received} from {wallet_short} sig={sig_short}")
 
         # 1. Redis dedup
         if self._redis:
@@ -149,6 +153,7 @@ class CopyTrader:
                 )
                 if not was_new:
                     self._skipped_dedup += 1
+                    logger.debug(f"[COPY] Dedup skip: {sig_short}")
                     return
             except Exception as e:
                 logger.debug(f"[COPY] Redis dedup check failed: {e}")
@@ -157,6 +162,7 @@ class CopyTrader:
         tracked = self._get_tracked_wallets()
         config = tracked.get(wallet_address)
         if not config or not config.get("enabled", True):
+            logger.info(f"[COPY] Wallet disabled: {wallet_short}")
             return
 
         # 3. Helius parse
@@ -166,7 +172,7 @@ class CopyTrader:
                 timeout=10.0,
             )
         except TimeoutError:
-            logger.warning(f"[COPY] Helius timeout for {signature[:16]}")
+            logger.warning(f"[COPY] Helius timeout for {sig_short}")
             self._errors += 1
             return
         except Exception as e:
@@ -175,6 +181,7 @@ class CopyTrader:
             return
 
         if not txs:
+            logger.info(f"[COPY] Helius returned empty for {sig_short}")
             return
 
         tx = txs[0]
@@ -182,15 +189,25 @@ class CopyTrader:
         # 4. Validate: must be SWAP, no error, fee_payer matches wallet
         if tx.type != "SWAP":
             self._skipped_non_swap += 1
+            logger.info(
+                f"[COPY] Not SWAP: type={tx.type} source={getattr(tx, 'source', '?')} "
+                f"sig={sig_short}"
+            )
             return
         if tx.transaction_error:
+            logger.info(f"[COPY] TX error: {sig_short}")
             return
         if tx.fee_payer != wallet_address:
+            logger.info(
+                f"[COPY] Fee payer mismatch: expected={wallet_short} "
+                f"got={tx.fee_payer[:12] if tx.fee_payer else 'None'}"
+            )
             return
 
         # 5. Parse swap details
         swap = self._parse_swap(wallet_address, config, tx)
         if not swap:
+            logger.info(f"[COPY] Parse failed (no SOL flow or min_sol): {sig_short}")
             return
 
         self._swaps_parsed += 1
