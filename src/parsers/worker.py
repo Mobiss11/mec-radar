@@ -757,13 +757,76 @@ async def run_parser() -> None:
         grpc_client.on_lp_removal = rug_guard.on_lp_removal
         logger.info("[RUGGUARD] Enabled — real-time LP removal detection via gRPC")
 
+    # Phase 57: Copy trading engine — gRPC wallet monitoring + Helius swap parsing
+    copy_trader: "CopyTrader | None" = None
+    if settings.copy_trading_enabled and grpc_client and helius:
+        try:
+            from src.trading.copy_trader import CopyTrader
+
+            copy_trader = CopyTrader(
+                helius=helius,
+                alert_dispatcher=alert_dispatcher,
+                redis=redis,
+                take_profit_x=settings.copy_trade_take_profit_x,
+                stop_loss_pct=settings.copy_trade_stop_loss_pct,
+                timeout_hours=settings.copy_trade_timeout_hours,
+                trailing_activation_x=settings.copy_trade_trailing_activation_x,
+                trailing_drawdown_pct=settings.copy_trade_trailing_drawdown_pct,
+                stagnation_timeout_min=settings.copy_trade_stagnation_timeout_min,
+                stagnation_max_pnl_pct=settings.copy_trade_stagnation_max_pnl_pct,
+                max_positions=settings.copy_trade_max_positions,
+                default_sol_per_trade=settings.copy_trade_default_sol,
+                min_sol_amount=settings.copy_trade_min_sol_amount,
+                sell_mirror=settings.copy_trade_sell_mirror,
+                dedup_ttl_sec=settings.copy_trade_dedup_ttl_sec,
+            )
+
+            # Wire gRPC callback for copy trading
+            async def _on_copy_swap(wallet_address: str, signature: str) -> None:
+                """gRPC callback: detected transaction from tracked wallet."""
+                from src.db.database import async_session_factory
+
+                try:
+                    async with async_session_factory() as session:
+                        await copy_trader.on_copy_swap_detected(
+                            wallet_address, signature, session,
+                        )
+                        await session.commit()
+                except Exception as e:
+                    logger.error(f"[COPY] Callback error: {e}")
+
+            grpc_client.on_copy_swap = _on_copy_swap
+
+            # Load tracked wallets and set gRPC filter
+            from src.api.routers.copy_trading import get_tracked_wallets
+            tracked = get_tracked_wallets()
+            enabled_addrs = {
+                addr for addr, cfg in tracked.items() if cfg.get("enabled", True)
+            }
+            if enabled_addrs:
+                grpc_client.set_copy_trade_wallets(enabled_addrs)
+
+            logger.info(
+                f"[COPY] Copy trading enabled: {len(enabled_addrs)} wallets, "
+                f"max {settings.copy_trade_max_positions} positions, "
+                f"{settings.copy_trade_default_sol} SOL/trade"
+            )
+        except Exception as e:
+            logger.error(f"[COPY] Failed to initialize copy trading: {e}")
+            copy_trader = None
+
     # Build task list based on feature flags
     tasks: list[asyncio.Task] = []
 
-    # gRPC: RugGuard-only mode (no pump.fun discovery — GMGN is primary)
+    # gRPC: RugGuard LP monitor + copy trading wallet monitor
     if grpc_client:
         tasks.append(asyncio.create_task(grpc_client.connect(), name="grpc_streaming"))
-        logger.info("Chainstack gRPC streaming enabled (RugGuard LP monitor only)")
+        _grpc_modes = []
+        if rug_guard:
+            _grpc_modes.append("RugGuard")
+        if copy_trader:
+            _grpc_modes.append("CopyTrading")
+        logger.info(f"Chainstack gRPC streaming enabled ({'+'.join(_grpc_modes) or 'standby'})")
 
     if settings.enable_pumpportal:
         tasks.append(asyncio.create_task(pumpportal.connect(), name="pumpportal_ws"))
@@ -902,6 +965,33 @@ async def run_parser() -> None:
             )
         )
         logger.info("[REAL] Real trading sweep (5m) loop enabled")
+
+    # Phase 57: Copy trading — price loop (5s) + sweep (5m) + wallet refresh (60s)
+    if copy_trader:
+        if birdeye or jupiter:
+            tasks.append(
+                asyncio.create_task(
+                    _copy_price_loop(
+                        copy_trader, birdeye=birdeye, jupiter=jupiter, dexscreener=dexscreener,
+                    ),
+                    name="copy_price",
+                )
+            )
+            logger.info("[COPY] Copy trading real-time prices enabled (5s)")
+        tasks.append(
+            asyncio.create_task(
+                _copy_sweep_loop(copy_trader),
+                name="copy_sweep",
+            )
+        )
+        if grpc_client:
+            tasks.append(
+                asyncio.create_task(
+                    _copy_wallet_refresh_loop(grpc_client),
+                    name="copy_wallet_refresh",
+                )
+            )
+        logger.info("[COPY] Copy trading sweep (5m) + wallet refresh (60s) loops enabled")
 
     # Phase 45: RugGuard position refresh loop
     if rug_guard:
@@ -4329,6 +4419,184 @@ async def _real_sweep_loop(real_trader: "RealTrader") -> None:
             logger.debug(f"[REAL] Sweep loop error: {e}")
 
         await asyncio.sleep(300)
+
+
+async def _copy_price_loop(
+    copy_trader: "CopyTrader",
+    birdeye: "BirdeyeClient | None" = None,
+    jupiter: "JupiterClient | None" = None,
+    dexscreener: "DexScreenerClient | None" = None,
+) -> None:
+    """Real-time price updates for open copy-trade positions (5s cycle).
+
+    Same pattern as _paper_price_loop / _real_price_loop but for source='copy_trade'.
+    """
+    from sqlalchemy import select as sa_select
+
+    from src.db.database import async_session_factory
+    from src.models.trade import Position
+
+    COPY_PRICE_INTERVAL = 5
+
+    await asyncio.sleep(8)  # Wait for initial gRPC connection
+
+    while True:
+        _interval = COPY_PRICE_INTERVAL
+        try:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    sa_select(Position).where(
+                        Position.status == "open",
+                        Position.source == "copy_trade",
+                    )
+                )
+                positions = list(result.scalars().all())
+
+            if not positions:
+                await asyncio.sleep(15)
+                continue
+
+            addresses = list({p.token_address for p in positions})
+
+            # Primary: Birdeye multi-price with liquidity
+            token_prices: dict[int, Decimal] = {}
+            live_liq_map: dict[int, float | None] = {}
+            _dead_tokens: set[int] = set()
+
+            if birdeye:
+                try:
+                    import time as _time_c
+                    _now_unix = int(_time_c.time())
+                    _stale_thr = 300
+                    _dead_thr = 600
+                    be_prices = await birdeye.get_price_multi(
+                        addresses[:100], include_liquidity=True,
+                    )
+                    for pos in positions:
+                        bp = be_prices.get(pos.token_address)
+                        if bp and bp.value:
+                            if bp.updateUnixTime and (_now_unix - bp.updateUnixTime) > _stale_thr:
+                                _age = _now_unix - bp.updateUnixTime
+                                if _age > _dead_thr:
+                                    live_liq_map[pos.token_id] = 0.0
+                                    token_prices[pos.token_id] = bp.value
+                                    _dead_tokens.add(pos.token_id)
+                                continue
+                            token_prices[pos.token_id] = bp.value
+                        if bp and bp.liquidity is not None:
+                            live_liq_map[pos.token_id] = float(bp.liquidity)
+                except Exception as e:
+                    logger.debug(f"[COPY] Birdeye multi-price failed: {e}")
+
+            # Fallback: Jupiter batch
+            missing_addrs = [p.token_address for p in positions if p.token_id not in token_prices]
+            if jupiter and missing_addrs:
+                try:
+                    jp_prices = await jupiter.get_prices_batch(missing_addrs[:100])
+                    for pos in positions:
+                        if pos.token_id not in token_prices:
+                            jp = jp_prices.get(pos.token_address)
+                            if jp and jp.price:
+                                token_prices[pos.token_id] = jp.price
+                except Exception as e:
+                    logger.debug(f"[COPY] Jupiter batch fallback failed: {e}")
+
+            # DexScreener liq fallback
+            if dexscreener and positions:
+                _addr_to_tid = {p.token_address: p.token_id for p in positions}
+                _dex_addrs = list({p.token_address for p in positions})[:10]
+                for _addr in _dex_addrs:
+                    try:
+                        _pairs = await dexscreener.get_token_pairs(_addr)
+                        _tid = _addr_to_tid.get(_addr)
+                        if not _pairs or not _tid:
+                            continue
+                        _max_liq = 0.0
+                        for _pair in _pairs:
+                            _pair_liq = float(_pair.liquidity.usd) if _pair.liquidity and _pair.liquidity.usd else 0
+                            _max_liq = max(_max_liq, _pair_liq)
+                        if _tid not in live_liq_map:
+                            live_liq_map[_tid] = _max_liq
+                    except Exception:
+                        pass
+
+            if not token_prices:
+                await asyncio.sleep(COPY_PRICE_INTERVAL)
+                continue
+
+            from src.parsers.sol_price import get_sol_price
+            _sol_usd = get_sol_price()
+            async with async_session_factory() as session:
+                for token_id, price in token_prices.items():
+                    await copy_trader.update_positions(
+                        session, token_id, price,
+                        liquidity_usd=live_liq_map.get(token_id),
+                        sol_price_usd=_sol_usd,
+                        is_dead_price=token_id in _dead_tokens,
+                    )
+                await session.commit()
+
+            # Adaptive interval: 2s if fresh positions (<120s old)
+            from datetime import datetime, UTC
+            _now_dt = datetime.now(UTC).replace(tzinfo=None)
+            _has_fresh = any(
+                pos.opened_at and (_now_dt - pos.opened_at).total_seconds() < 120
+                for pos in positions
+            )
+            if _has_fresh:
+                _interval = 2
+
+        except Exception as e:
+            logger.warning(f"[COPY] Price loop error: {e}")
+
+        await asyncio.sleep(_interval)
+
+
+async def _copy_sweep_loop(copy_trader: "CopyTrader") -> None:
+    """Close copy-trade positions that exceeded timeout."""
+    from src.db.database import async_session_factory
+
+    await asyncio.sleep(120)
+
+    while True:
+        try:
+            async with async_session_factory() as session:
+                closed = await copy_trader.sweep_stale_positions(session)
+                if closed > 0:
+                    await session.commit()
+        except Exception as e:
+            logger.debug(f"[COPY] Sweep loop error: {e}")
+
+        await asyncio.sleep(300)
+
+
+async def _copy_wallet_refresh_loop(
+    grpc_client: "ChainstackGrpcClient",
+) -> None:
+    """Periodically check if tracked wallet list changed and update gRPC filter.
+
+    Runs every 60s. When wallets are added/removed via API, the gRPC subscription
+    must be rebuilt to include/exclude addresses in account_include filter.
+    """
+    await asyncio.sleep(30)
+
+    _last_wallet_set: set[str] = set()
+
+    while True:
+        try:
+            from src.api.routers.copy_trading import get_tracked_wallets
+            tracked = get_tracked_wallets()
+            enabled_addrs = {
+                addr for addr, cfg in tracked.items() if cfg.get("enabled", True)
+            }
+
+            if enabled_addrs != _last_wallet_set:
+                grpc_client.set_copy_trade_wallets(enabled_addrs)
+                _last_wallet_set = set(enabled_addrs)
+        except Exception as e:
+            logger.debug(f"[COPY] Wallet refresh error: {e}")
+
+        await asyncio.sleep(60)
 
 
 async def _data_cleanup_loop() -> None:

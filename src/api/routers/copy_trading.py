@@ -429,11 +429,20 @@ async def list_copy_positions(
 
     items = []
     for p in positions:
+        # Resolve wallet label from tracked wallets
+        wallet_label = ""
+        if p.copied_from_wallet:
+            w_cfg = _tracked_wallets.get(p.copied_from_wallet)
+            if w_cfg:
+                wallet_label = w_cfg.get("label", "")
+
         items.append({
             "id": p.id,
             "token_address": p.token_address,
             "symbol": p.symbol,
             "source": p.source,
+            "copied_from_wallet": p.copied_from_wallet,
+            "wallet_label": wallet_label,
             "entry_price": float(p.entry_price) if p.entry_price else None,
             "current_price": float(p.current_price) if p.current_price else None,
             "amount_sol_invested": float(p.amount_sol_invested) if p.amount_sol_invested else None,
@@ -442,7 +451,6 @@ async def list_copy_positions(
             "status": p.status,
             "close_reason": p.close_reason,
             "is_paper": bool(p.is_paper),
-            "tx_hash": p.tx_hash if hasattr(p, "tx_hash") else None,
             "opened_at": p.opened_at.isoformat() if p.opened_at else None,
             "closed_at": p.closed_at.isoformat() if p.closed_at else None,
         })
@@ -456,3 +464,74 @@ async def list_copy_positions(
         "total_pages": total_pages,
         "has_more": page < total_pages,
     }
+
+
+@router.get("/stats/by-wallet")
+async def stats_by_wallet(
+    session: AsyncSession = Depends(get_session),
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Per-wallet copy trading P&L stats — how each tracked wallet performs for us."""
+
+    # Aggregate closed positions by copied_from_wallet
+    q = (
+        select(
+            Position.copied_from_wallet,
+            func.count().label("total_trades"),
+            func.count(case((Position.pnl_pct > 0, 1))).label("wins"),
+            func.count(case((Position.pnl_pct <= 0, 1))).label("losses"),
+            func.coalesce(func.sum(Position.pnl_usd), 0).label("total_pnl_usd"),
+            func.coalesce(func.avg(Position.pnl_pct), 0).label("avg_pnl_pct"),
+        )
+        .where(
+            Position.source == "copy_trade",
+            Position.status == "closed",
+            Position.copied_from_wallet.isnot(None),
+        )
+        .group_by(Position.copied_from_wallet)
+    )
+    result = await session.execute(q)
+    rows = result.all()
+
+    # Also count open positions per wallet
+    open_q = (
+        select(
+            Position.copied_from_wallet,
+            func.count().label("open_count"),
+        )
+        .where(
+            Position.source == "copy_trade",
+            Position.status == "open",
+            Position.copied_from_wallet.isnot(None),
+        )
+        .group_by(Position.copied_from_wallet)
+    )
+    open_result = await session.execute(open_q)
+    open_map = {r.copied_from_wallet: r.open_count for r in open_result.all()}
+
+    items = []
+    for row in rows:
+        wallet_addr = row.copied_from_wallet
+        w_cfg = _tracked_wallets.get(wallet_addr, {})
+        total = row.total_trades or 0
+        wins = row.wins or 0
+        wr = round((wins / total * 100) if total > 0 else 0, 1)
+
+        items.append({
+            "address": wallet_addr,
+            "label": w_cfg.get("label", (wallet_addr or "")[:12]),
+            "gmgn_rank": w_cfg.get("gmgn_rank"),
+            "winrate_7d": w_cfg.get("winrate_7d"),
+            "total_trades": total,
+            "wins": wins,
+            "losses": row.losses or 0,
+            "win_rate": wr,
+            "total_pnl_usd": float(row.total_pnl_usd),
+            "avg_pnl_pct": round(float(row.avg_pnl_pct), 1),
+            "open_positions": open_map.get(wallet_addr, 0),
+        })
+
+    # Sort by total P&L descending
+    items.sort(key=lambda x: x["total_pnl_usd"], reverse=True)
+
+    return {"items": items, "total": len(items)}

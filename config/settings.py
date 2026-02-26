@@ -137,6 +137,21 @@ class Settings(BaseSettings):
     real_circuit_breaker_cooldown_sec: int = 1800  # 30 min cooldown
     real_rugcheck_recheck_threshold: int = 15000  # Phase 53: rugcheck score above this blocks real trade
 
+    # Copy trading (Phase 57 — monitors tracked wallets via gRPC + Helius)
+    copy_trading_enabled: bool = False  # Master kill switch
+    copy_trade_max_positions: int = 20  # Max simultaneous copy-trade positions
+    copy_trade_default_sol: float = 0.05  # SOL per copy trade (overridden by per-wallet config)
+    copy_trade_take_profit_x: float = 1.5
+    copy_trade_stop_loss_pct: float = -50.0
+    copy_trade_timeout_hours: int = 8
+    copy_trade_trailing_activation_x: float = 1.3
+    copy_trade_trailing_drawdown_pct: float = 15.0
+    copy_trade_stagnation_timeout_min: float = 25.0
+    copy_trade_stagnation_max_pnl_pct: float = 15.0
+    copy_trade_min_sol_amount: float = 0.01  # Ignore swaps smaller than 0.01 SOL
+    copy_trade_sell_mirror: bool = True  # Close position when tracked wallet sells
+    copy_trade_dedup_ttl_sec: int = 300  # Redis dedup TTL for processed signatures
+
     # SolSniffer (paid plan — higher cap)
     enable_solsniffer: bool = True
     solsniffer_api_key: str = ""

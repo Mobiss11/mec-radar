@@ -5,6 +5,7 @@ Uses the same callback interface (on_new_token, on_migration, on_trade)
 so worker.py integration is seamless.
 
 Phase 45: Added Raydium AMM transaction filter for RugGuard LP removal detection.
+Phase 57: Added copy trading filter — monitors tracked wallets for swap detection.
 """
 
 import asyncio
@@ -78,6 +79,7 @@ class ChainstackGrpcClient:
         self._reconnect_count = 0
         self._decode_errors = 0
         self._lp_removal_count = 0
+        self._copy_trade_count = 0
 
         # Callbacks — same interface as PumpPortalClient
         self.on_new_token: Callable[[PumpPortalNewToken], Awaitable[None]] | None = None
@@ -85,6 +87,10 @@ class ChainstackGrpcClient:
         self.on_trade: Callable[[PumpPortalTrade], Awaitable[None]] | None = None
         # Phase 45: RugGuard — LP removal callback (mint, signature, sol_amount, token_amount)
         self.on_lp_removal: Callable[[str, str, int, int], Awaitable[None]] | None = None
+        # Phase 57: Copy trading — wallet swap callback (wallet_address, signature)
+        self.on_copy_swap: Callable[[str, str], Awaitable[None]] | None = None
+        self._copy_trade_wallets: set[str] = set()
+        self._reconnect_requested = False
 
     @property
     def state(self) -> ConnectionState:
@@ -93,6 +99,29 @@ class ChainstackGrpcClient:
     @property
     def message_count(self) -> int:
         return self._message_count
+
+    def set_copy_trade_wallets(self, wallets: set[str]) -> None:
+        """Update the set of tracked wallet addresses for copy trading.
+
+        If the set changed, sets reconnect flag so the gRPC subscription
+        is rebuilt with new account_include filter on next iteration.
+        """
+        if wallets != self._copy_trade_wallets:
+            old_count = len(self._copy_trade_wallets)
+            self._copy_trade_wallets = set(wallets)
+            logger.info(
+                f"[GRPC] Copy trade wallets updated: {old_count} → {len(wallets)}"
+            )
+            if self._state == ConnectionState.ACTIVE:
+                self.request_reconnect()
+
+    def request_reconnect(self) -> None:
+        """Request gRPC reconnection to rebuild subscription filters.
+
+        The connect() loop checks this flag and breaks the stream to reconnect.
+        """
+        self._reconnect_requested = True
+        logger.info("[GRPC] Reconnect requested (filter update)")
 
     async def connect(self) -> None:
         """Connect to Chainstack gRPC and stream pump.fun transactions.
@@ -120,10 +149,17 @@ class ChainstackGrpcClient:
                     _filters.append("pump.fun")
                 if self.on_lp_removal:
                     _filters.append("raydium_amm")
+                if self.on_copy_swap and self._copy_trade_wallets:
+                    _filters.append(f"copy_trade({len(self._copy_trade_wallets)}w)")
                 logger.info(f"[GRPC] Subscribed to {'+'.join(_filters)} transactions (PROCESSED)")
 
                 async for update in stub.Subscribe(iter([request])):
                     if not self._running:
+                        break
+                    # Phase 57: reconnect to rebuild filters when wallet list changes
+                    if self._reconnect_requested:
+                        self._reconnect_requested = False
+                        logger.info("[GRPC] Breaking stream for reconnect (filter update)")
                         break
                     self._message_count += 1
                     await self._process_update(update)
@@ -134,6 +170,7 @@ class ChainstackGrpcClient:
                             f"[GRPC] Stats: {self._message_count} msgs, "
                             f"{self._token_count} tokens, {self._trade_count} trades, "
                             f"{self._lp_removal_count} lp_removals, "
+                            f"{self._copy_trade_count} copy_trades, "
                             f"{self._decode_errors} decode errors"
                         )
 
@@ -215,6 +252,18 @@ class ChainstackGrpcClient:
             raydium_filter.failed = False
             logger.info("[GRPC] Raydium AMM filter added for RugGuard LP monitoring")
 
+        # Filter 3: Copy trading — tracked wallet transactions
+        # Monitors all transactions from tracked wallets, then filters by fee_payer
+        # in _process_update to detect swaps initiated by the wallet
+        if self.on_copy_swap and self._copy_trade_wallets:
+            copy_filter = request.transactions["copy_trade_txs"]
+            for addr in self._copy_trade_wallets:
+                copy_filter.account_include.append(addr)
+            copy_filter.failed = False
+            logger.info(
+                f"[GRPC] Copy trade filter added: {len(self._copy_trade_wallets)} wallets"
+            )
+
         # Fastest commitment level
         request.commitment = geyser_pb2.CommitmentLevel.PROCESSED
 
@@ -235,6 +284,24 @@ class ChainstackGrpcClient:
 
         account_keys = list(msg.account_keys)
         signature = base58.b58encode(bytes(tx.signature)).decode()
+
+        # Phase 57: Copy trading — check if fee_payer is a tracked wallet
+        # account_keys[0] is always the fee payer / transaction signer
+        if self.on_copy_swap and self._copy_trade_wallets and account_keys:
+            fee_payer_bytes = bytes(account_keys[0])
+            fee_payer = base58.b58encode(fee_payer_bytes).decode()
+            if fee_payer in self._copy_trade_wallets:
+                self._copy_trade_count += 1
+                try:
+                    await asyncio.wait_for(
+                        self.on_copy_swap(fee_payer, signature),
+                        timeout=5.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"[GRPC] on_copy_swap timeout: {signature[:16]}")
+                except Exception as e:
+                    logger.error(f"[GRPC] Error in on_copy_swap callback: {e}")
+                # Don't return — let other filters also process if applicable
 
         # Check for migration first
         if is_migration_transaction(account_keys):
@@ -545,5 +612,6 @@ class ChainstackGrpcClient:
         logger.info(
             f"[GRPC] Stopped. Processed {self._message_count} messages, "
             f"{self._token_count} tokens, {self._trade_count} trades, "
-            f"{self._lp_removal_count} lp_removals"
+            f"{self._lp_removal_count} lp_removals, "
+            f"{self._copy_trade_count} copy_trades"
         )

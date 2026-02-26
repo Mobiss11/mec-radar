@@ -24,6 +24,9 @@ class Trade(Base):
     fee_sol: Mapped[Decimal | None] = mapped_column(Numeric)
     tx_hash: Mapped[str | None] = mapped_column(String(128))
     is_paper: Mapped[int] = mapped_column(Integer, default=1)
+    # Phase 57: Copy trading source tracking
+    source: Mapped[str | None] = mapped_column(String(50))  # "signal" | "copy_trade"
+    copied_from_wallet: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str | None] = mapped_column(String(20))
     executed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
@@ -50,6 +53,9 @@ class Position(Base):
     status: Mapped[str] = mapped_column(String(20), default="open")
     close_reason: Mapped[str | None] = mapped_column(String(30))
     is_paper: Mapped[int] = mapped_column(Integer, default=1)
+    # Phase 57: Copy trading source tracking
+    source: Mapped[str | None] = mapped_column(String(50))  # "signal" | "copy_trade"
+    copied_from_wallet: Mapped[str | None] = mapped_column(String(64))
     opened_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
 
@@ -58,7 +64,7 @@ class Position(Base):
         Index("idx_positions_token_status", "token_id", "status"),
         Index(
             "uq_positions_open_paper",
-            "token_id", "is_paper",
+            "token_id", "is_paper", "source",
             unique=True,
             postgresql_where=text("status = 'open'"),
         ),

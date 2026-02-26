@@ -271,6 +271,97 @@ class AlertDispatcher:
         logger.warning(f"[REAL] Alert: {message}")
         await self._send_telegram_text(text)
 
+    # ─── Copy trading alerts (Phase 57) ─────────────────────────────
+
+    async def send_copy_open(
+        self,
+        symbol: str,
+        address: str,
+        price: float,
+        sol_amount: float,
+        wallet_label: str,
+        wallet_address: str,
+        source_dex: str,
+        is_paper: bool,
+        tx_hash: str | None = None,
+    ) -> None:
+        """Notify about a new copy-trade position (paper or real)."""
+        if is_paper:
+            emoji = "📋"
+            mode = "COPY PAPER"
+        else:
+            emoji = "📋💰"
+            mode = "COPY REAL"
+        safe_name = html_mod.escape(symbol or address[:12])
+        safe_label = html_mod.escape(wallet_label)
+        safe_dex = html_mod.escape(source_dex)
+
+        tx_line = ""
+        if tx_hash:
+            tx_line = f'TX: <a href="https://solscan.io/tx/{tx_hash}">{tx_hash[:16]}...</a>\n'
+
+        text = (
+            f"{emoji} <b>{mode}</b>: <b>{safe_name}</b>\n\n"
+            f"Copied from: <b>{safe_label}</b>\n"
+            f"Entry: ${price:.8g}\n"
+            f"Size: {sol_amount:.4f} SOL\n"
+            f"DEX: {safe_dex}\n"
+            f"{tx_line}\n"
+            f'<a href="https://gmgn.ai/sol/token/{address}">GMGN</a>'
+            f' · <a href="https://solscan.io/token/{address}">Solscan</a>'
+            f' · <a href="https://solscan.io/account/{wallet_address}">Wallet</a>\n'
+            f"<code>{address}</code>"
+        )
+        logger.info(
+            f"[COPY] {mode} {symbol or address[:12]} @ ${price:.8g} "
+            f"({sol_amount:.4f} SOL) from {wallet_label}"
+        )
+        await self._send_telegram_text(text)
+
+    async def send_copy_close(
+        self,
+        symbol: str,
+        address: str,
+        entry_price: float,
+        exit_price: float,
+        pnl_pct: float,
+        reason: str,
+        wallet_label: str,
+        is_paper: bool,
+        tx_hash: str | None = None,
+    ) -> None:
+        """Notify about a closed copy-trade position."""
+        if pnl_pct > 0:
+            emoji = "✅📋" if is_paper else "✅📋💰"
+        else:
+            emoji = "🔴📋" if is_paper else "🔴📋💰"
+        mode = "COPY CLOSE" if is_paper else "COPY REAL CLOSE"
+        safe_name = html_mod.escape(symbol or address[:12])
+        safe_label = html_mod.escape(wallet_label)
+        safe_reason = html_mod.escape(reason)
+
+        tx_line = ""
+        if tx_hash:
+            tx_line = f'TX: <a href="https://solscan.io/tx/{tx_hash}">{tx_hash[:16]}...</a>\n'
+
+        text = (
+            f"{emoji} <b>{mode}</b>: <b>{safe_name}</b>\n\n"
+            f"Copied from: <b>{safe_label}</b>\n"
+            f"Entry: ${entry_price:.8g}\n"
+            f"Exit: ${exit_price:.8g}\n"
+            f"P&L: <b>{pnl_pct:+.1f}%</b>\n"
+            f"Reason: {safe_reason}\n"
+            f"{tx_line}\n"
+            f'<a href="https://gmgn.ai/sol/token/{address}">GMGN</a>'
+            f' · <a href="https://solscan.io/token/{address}">Solscan</a>\n'
+            f"<code>{address}</code>"
+        )
+        logger.info(
+            f"[COPY] {mode} {symbol or address[:12]} "
+            f"P&L={pnl_pct:+.1f}% reason={reason} from {wallet_label}"
+        )
+        await self._send_telegram_text(text)
+
     # ─── Paper trading reports ────────────────────────────────────
 
     async def send_paper_report(self, stats: dict) -> None:
