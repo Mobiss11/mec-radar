@@ -50,7 +50,6 @@ class Position(Base):
     status: Mapped[str] = mapped_column(String(20), default="open")
     close_reason: Mapped[str | None] = mapped_column(String(30))
     is_paper: Mapped[int] = mapped_column(Integer, default=1)
-    is_micro_entry: Mapped[int] = mapped_column(Integer, default=0)  # Phase 51: micro-snipe flag
     opened_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     closed_at: Mapped[datetime | None] = mapped_column(DateTime)
 

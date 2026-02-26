@@ -689,8 +689,6 @@ async def run_parser() -> None:
             stagnation_timeout_min=settings.paper_stagnation_timeout_min,
             stagnation_max_pnl_pct=settings.paper_stagnation_max_pnl_pct,
             alert_dispatcher=alert_dispatcher,
-            micro_snipe_sol=settings.micro_snipe_sol_amount,
-            micro_snipe_max_positions=settings.micro_snipe_max_positions,
         )
         logger.info("Paper trading engine enabled")
 
@@ -1240,17 +1238,6 @@ async def _enrichment_worker(
                     # Passed — carry risk boost to INITIAL
                     task = prescan_result
 
-                    # Phase 51: Micro-snipe — buy at PRE_SCAN for high-velocity clean tokens
-                    if (
-                        paper_trader is not None
-                        and settings.micro_snipe_enabled
-                        and settings.paper_trading_enabled
-                    ):
-                        try:
-                            await _try_micro_snipe(task, paper_trader)
-                        except Exception as e:
-                            logger.debug(f"[MICRO] Failed for {task.address[:12]}: {e}")
-
                     # Fast pre-watch alert: notify user immediately for clean tokens
                     if alert_dispatcher and settings.enable_early_watch_alerts and prescan_result.prescan_risk_boost == 0:
                         try:
@@ -1449,7 +1436,6 @@ async def _run_prescan(
         f"(risk_boost={risk_boost}, flags={flags or 'none'}{mcap_str})"
     )
     # Return task with prescan_risk_boost + mint_info/sell_sim for INITIAL to use
-    # Phase 51: also carry birdeye_overview for micro-snipe + cached INITIAL reuse
     return EnrichmentTask(
         priority=task.priority,
         scheduled_at=task.scheduled_at,
@@ -1462,78 +1448,7 @@ async def _run_prescan(
         prescan_risk_boost=risk_boost,
         prescan_mint_info=mint_info,
         prescan_sell_sim=sell_sim,
-        prescan_birdeye_overview=birdeye_overview,
     )
-
-
-async def _try_micro_snipe(
-    task: EnrichmentTask,
-    paper_trader: "PaperTrader",
-) -> bool:
-    """Phase 51: Attempt micro-snipe entry at PRE_SCAN for high-velocity clean tokens.
-
-    Criteria (all must pass):
-    - micro_snipe_enabled + paper_trading_enabled
-    - prescan_risk_boost == 0 (clean token)
-    - buy5m >= min_buy5m (high velocity)
-    - sell5m < buy5m (net buying pressure)
-    - mcap < max_mcap_usd
-    - liquidity >= min_liquidity_usd
-    - price > 0
-
-    Returns True if position opened, False otherwise.
-    """
-    overview = task.prescan_birdeye_overview
-    if overview is None:
-        return False
-
-    if task.prescan_risk_boost != 0:
-        return False
-
-    buy5m = overview.buy5m or 0
-    sell5m = overview.sell5m or 0
-    mcap = float(overview.marketCap or 0)
-    liq = float(overview.liquidity or 0)
-    price = overview.price
-
-    if buy5m < settings.micro_snipe_min_buy5m:
-        return False
-    if sell5m >= buy5m:
-        return False
-    if mcap <= 0 or mcap > settings.micro_snipe_max_mcap_usd:
-        return False
-    if liq < settings.micro_snipe_min_liquidity_usd:
-        return False
-    if not price or price <= 0:
-        return False
-
-    # Get token from DB for token_id
-    from src.parsers.sol_price import get_sol_price_safe
-    sol_price = get_sol_price_safe()
-
-    async with async_session_factory() as session:
-        token = await get_token_by_address(session, task.address)
-        if token is None:
-            logger.debug(f"[MICRO] Token not in DB yet: {task.address[:12]}")
-            return False
-
-        position = await paper_trader.on_prescan_entry(
-            session,
-            token_id=token.id,
-            token_address=task.address,
-            symbol=token.symbol,
-            price=Decimal(str(float(price))),
-            liquidity_usd=liq,
-            sol_price_usd=sol_price,
-        )
-        if position:
-            await session.commit()
-            logger.info(
-                f"[MICRO] ✅ Micro-snipe opened {task.address[:12]} "
-                f"buy5m={buy5m} sell5m={sell5m} mcap=${mcap:,.0f} liq=${liq:,.0f}"
-            )
-            return True
-        return False
 
 
 async def _enrich_token(
@@ -1604,10 +1519,6 @@ async def _enrich_token(
         if _is_initial and config.fetch_gmgn_info:
             # --- BATCH 1: All independent external API calls in parallel ---
             async def _fetch_birdeye_overview() -> BirdeyeTokenOverview | None:
-                # Phase 51: reuse cached overview from PRE_SCAN (saves 30 CU)
-                if task.prescan_birdeye_overview is not None:
-                    logger.debug(f"[ENRICH] Using cached PRE_SCAN Birdeye overview for {task.address[:12]}")
-                    return task.prescan_birdeye_overview
                 if not birdeye:
                     return None
                 try:

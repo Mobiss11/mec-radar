@@ -170,14 +170,6 @@ class Settings(BaseSettings):
     enable_llm_analysis: bool = True
     llm_model: str = "google/gemini-2.5-flash-lite"
 
-    # Micro-snipe (Phase 51): buy at PRE_SCAN for high-velocity clean tokens
-    micro_snipe_enabled: bool = False  # Disabled by default — enable after testing
-    micro_snipe_sol_amount: float = 0.07  # ~$5-10 at SOL≈$83
-    micro_snipe_max_positions: int = 5  # Max concurrent micro positions
-    micro_snipe_min_buy5m: int = 15  # Min 5-min buys for trigger
-    micro_snipe_max_mcap_usd: float = 30000.0  # Only early-stage tokens
-    micro_snipe_min_liquidity_usd: float = 3000.0  # Min liquidity for entry
-
     # Dashboard
     dashboard_enabled: bool = True
     dashboard_port: int = 8080
