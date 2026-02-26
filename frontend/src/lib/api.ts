@@ -178,4 +178,95 @@ export const analytics = {
     ),
 }
 
+/* Copy Trading */
+export const copyTrading = {
+  summary: () =>
+    request<{
+      active_wallets: number
+      total_wallets: number
+      open_positions: number
+      total_invested_sol: number
+      closed_count: number
+      total_pnl_usd: number
+      win_rate: number
+      wins: number
+      losses: number
+      copy_trading_enabled: boolean
+    }>("/copy-trading/summary"),
+
+  wallets: () =>
+    request<{
+      items: Array<{
+        address: string
+        label: string
+        multiplier: number
+        max_sol_per_trade: number
+        enabled: boolean
+        added_at: string
+      }>
+      total: number
+    }>("/copy-trading/wallets"),
+
+  addWallet: (
+    data: {
+      address: string
+      label?: string
+      multiplier?: number
+      max_sol_per_trade?: number
+      enabled?: boolean
+    },
+    csrfToken: string,
+  ) =>
+    request<{ ok: boolean; address: string; total_wallets: number }>(
+      "/copy-trading/wallets",
+      {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: JSON.stringify(data),
+      },
+    ),
+
+  updateWallet: (
+    address: string,
+    data: {
+      label?: string
+      multiplier?: number
+      max_sol_per_trade?: number
+      enabled?: boolean
+    },
+    csrfToken: string,
+  ) =>
+    request<{ ok: boolean; address: string; wallet: Record<string, unknown> }>(
+      `/copy-trading/wallets/${address}`,
+      {
+        method: "PATCH",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: JSON.stringify(data),
+      },
+    ),
+
+  removeWallet: (address: string, csrfToken: string) =>
+    request<{ ok: boolean; address: string; total_wallets: number }>(
+      `/copy-trading/wallets/${address}`,
+      {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": csrfToken },
+      },
+    ),
+
+  positions: (params: Record<string, string | number>) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== "" && v != null) qs.set(k, String(v))
+    }
+    return request<{
+      items: Array<Record<string, unknown>>
+      total: number
+      page: number
+      total_pages: number
+      has_more: boolean
+    }>(`/copy-trading/positions?${qs}`)
+  },
+}
+
 export { ApiError }

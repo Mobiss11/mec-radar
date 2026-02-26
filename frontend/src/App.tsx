@@ -8,6 +8,7 @@ import { TokensPage } from "@/pages/tokens"
 import { SignalsPage } from "@/pages/signals-page"
 import { PortfolioPage } from "@/pages/portfolio-page"
 import { AnalyticsPage } from "@/pages/analytics-page"
+import { CopyTradingPage } from "@/pages/copy-trading-page"
 import { SettingsPage } from "@/pages/settings-page"
 import type { ReactNode } from "react"
 
@@ -72,6 +73,7 @@ export default function App() {
               <Route path="tokens" element={<TokensPage />} />
               <Route path="signals" element={<SignalsPage />} />
               <Route path="portfolio" element={<PortfolioPage />} />
+              <Route path="copy-trading" element={<CopyTradingPage />} />
               <Route path="analytics" element={<AnalyticsPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>

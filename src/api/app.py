@@ -50,6 +50,7 @@ def create_app() -> FastAPI:
     # Import and include routers
     from src.api.routers.analytics import router as analytics_router
     from src.api.routers.auth_router import router as auth_router
+    from src.api.routers.copy_trading import router as copy_trading_router
     from src.api.routers.health import router as health_router
     from src.api.routers.metrics import router as metrics_router
     from src.api.routers.portfolio import router as portfolio_router
@@ -63,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(tokens_router)
     app.include_router(signals_router)
     app.include_router(portfolio_router)
+    app.include_router(copy_trading_router)
     app.include_router(settings_router)
     app.include_router(analytics_router)
 

@@ -6,6 +6,7 @@ import {
   Coins,
   Signal,
   Briefcase,
+  Users,
   Settings,
   BarChart3,
   LogOut,
@@ -18,6 +19,7 @@ const navItems = [
   { to: "/tokens", icon: Coins, label: "Tokens" },
   { to: "/signals", icon: Signal, label: "Signals" },
   { to: "/portfolio", icon: Briefcase, label: "Portfolio" },
+  { to: "/copy-trading", icon: Users, label: "Copy Trading" },
   { to: "/analytics", icon: BarChart3, label: "Analytics" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ]

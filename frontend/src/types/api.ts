@@ -217,6 +217,47 @@ export interface TopPerformer {
   source: string | null
 }
 
+/* Copy Trading */
+export interface CopyTradingSummary {
+  active_wallets: number
+  total_wallets: number
+  open_positions: number
+  total_invested_sol: number
+  closed_count: number
+  total_pnl_usd: number
+  win_rate: number
+  wins: number
+  losses: number
+  copy_trading_enabled: boolean
+}
+
+export interface TrackedWallet {
+  address: string
+  label: string
+  multiplier: number
+  max_sol_per_trade: number
+  enabled: boolean
+  added_at: string
+}
+
+export interface CopyPosition {
+  id: number
+  token_address: string
+  symbol: string | null
+  source: string | null
+  entry_price: number | null
+  current_price: number | null
+  amount_sol_invested: number | null
+  pnl_pct: number | null
+  pnl_usd: number | null
+  status: string
+  close_reason: string | null
+  is_paper: boolean
+  tx_hash: string | null
+  opened_at: string | null
+  closed_at: string | null
+}
+
 /* Auth */
 export interface AuthUser {
   username: string
