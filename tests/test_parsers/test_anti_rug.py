@@ -117,10 +117,10 @@ async def test_save_rugcheck_three_reports_max_monotonic(db_session):
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def test_real_min_liquidity_is_15k():
-    """Phase 53: real_min_liquidity_usd should be 15000."""
+def test_real_min_liquidity_is_5k():
+    """real_min_liquidity_usd should be 5000 (reverted from 15K — cuts profits)."""
     from config.settings import settings
-    assert settings.real_min_liquidity_usd == 15000.0
+    assert settings.real_min_liquidity_usd == 5000.0
 
 
 def test_real_rugcheck_recheck_threshold_in_settings():
@@ -163,7 +163,7 @@ def test_risk_manager_uses_min_liquidity():
         max_sol_per_trade=0.1,
         max_positions=3,
         max_total_exposure_sol=0.5,
-        min_liquidity_usd=15000.0,  # Phase 53 value
+        min_liquidity_usd=5000.0,  # Default $5K threshold
         min_wallet_balance_sol=0.05,
     )
 
@@ -173,7 +173,7 @@ def test_risk_manager_uses_min_liquidity():
         open_position_count=0,
         total_open_exposure_sol=0.0,
         invest_sol=0.08,
-        liquidity_usd=7736.0,  # RLT's liquidity
+        liquidity_usd=3000.0,  # Below $5K
     )
     assert allowed is False
     assert "Liquidity" in reason
@@ -184,6 +184,6 @@ def test_risk_manager_uses_min_liquidity():
         open_position_count=0,
         total_open_exposure_sol=0.0,
         invest_sol=0.08,
-        liquidity_usd=20000.0,
+        liquidity_usd=7000.0,  # Above $5K — should pass
     )
     assert allowed2 is True
