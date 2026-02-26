@@ -25,8 +25,6 @@ import {
   Loader2,
   FileText,
   Zap,
-  Trophy,
-  BarChart3,
 } from "lucide-react"
 
 /* ---------- Types ---------- */
