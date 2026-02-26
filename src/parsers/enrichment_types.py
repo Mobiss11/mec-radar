@@ -67,7 +67,7 @@ STAGE_SCHEDULE: dict[EnrichmentStage, StageConfig] = {
         fetch_metadata=True,
     ),
     EnrichmentStage.MIN_2: StageConfig(
-        offset_sec=25,  # Reduced from 45s to 25s — profitable entries at T+27-40s, catch 15s earlier
+        offset_sec=15,  # Phase 49: reduced from 25s to 15s — faster re-score for tokens near threshold
         fetch_gmgn_info=True,  # quick price check for early pump/dump detection
         fetch_dexscreener=True,
     ),
@@ -164,3 +164,5 @@ class EnrichmentTask:
     # Phase 14A: carry mint_info and sell_sim from PRE_SCAN to INITIAL for signals R23-R24
     prescan_mint_info: Any = field(compare=False, default=None)
     prescan_sell_sim: Any = field(compare=False, default=None)
+    # Phase 51: carry Birdeye overview from PRE_SCAN to INITIAL (saves 30 CU + micro-snipe data)
+    prescan_birdeye_overview: Any = field(compare=False, default=None)

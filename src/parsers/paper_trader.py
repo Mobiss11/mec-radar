@@ -40,6 +40,8 @@ class PaperTrader:
         stagnation_timeout_min: float = 25.0,
         stagnation_max_pnl_pct: float = 15.0,
         alert_dispatcher: AlertDispatcher | None = None,
+        micro_snipe_sol: float = 0.07,
+        micro_snipe_max_positions: int = 5,
     ) -> None:
         self._sol_per_trade = Decimal(str(sol_per_trade))
         self._max_positions = max_positions
@@ -51,6 +53,9 @@ class PaperTrader:
         self._stagnation_timeout_min = stagnation_timeout_min
         self._stagnation_max_pnl_pct = stagnation_max_pnl_pct
         self._alerts = alert_dispatcher
+        # Phase 51: micro-snipe params
+        self._micro_snipe_sol = Decimal(str(micro_snipe_sol))
+        self._micro_snipe_max = micro_snipe_max_positions
 
     async def on_signal(
         self,
@@ -90,7 +95,7 @@ class PaperTrader:
             logger.warning(f"[PAPER] Max positions reached ({open_count}/{self._max_positions}), skipping {signal.token_address[:12]}")
             return None
 
-        # No duplicate position for same token
+        # No duplicate position for same token (or top-up micro position)
         existing = await session.execute(
             select(Position).where(
                 Position.token_id == signal.token_id,
@@ -98,7 +103,14 @@ class PaperTrader:
                 Position.is_paper == 1,
             )
         )
-        if existing.scalar_one_or_none() is not None:
+        existing_pos = existing.scalar_one_or_none()
+        if existing_pos is not None:
+            # Phase 51: if it's a micro-snipe position, top it up to full size
+            if existing_pos.is_micro_entry == 1:
+                return await self._topup_micro_position(
+                    session, existing_pos, signal, price,
+                    liquidity_usd, sol_price_usd,
+                )
             logger.info(f"[PAPER] Duplicate position for {signal.token_address[:12]}, skipping")
             return None
 
@@ -176,6 +188,217 @@ class PaperTrader:
                 )
             except Exception as e:
                 logger.warning(f"[PAPER] Alert send failed: {e}")
+
+        return position
+
+    async def on_prescan_entry(
+        self,
+        session: AsyncSession,
+        token_id: int,
+        token_address: str,
+        symbol: str | None,
+        price: Decimal,
+        liquidity_usd: float | None = None,
+        sol_price_usd: float | None = None,
+    ) -> Position | None:
+        """Phase 51: Open a micro-snipe position at PRE_SCAN (T+5s).
+
+        Tiny position ($5-10) opened before full scoring — will be topped up
+        to full size if INITIAL/MIN_2 confirms with buy/strong_buy signal.
+        Returns Position or None if skipped.
+        """
+        if price <= 0:
+            return None
+
+        # Check max micro positions
+        micro_count_result = await session.execute(
+            select(func.count(Position.id)).where(
+                Position.status == "open",
+                Position.is_paper == 1,
+                Position.is_micro_entry == 1,
+            )
+        )
+        micro_count = micro_count_result.scalar_one()
+        if micro_count >= self._micro_snipe_max:
+            logger.debug(
+                f"[MICRO] Max micro positions ({micro_count}/{self._micro_snipe_max}), "
+                f"skipping {token_address[:12]}"
+            )
+            return None
+
+        # Also check total max positions
+        open_count = await self._count_open_positions(session)
+        if open_count >= self._max_positions:
+            logger.debug(f"[MICRO] Max total positions ({open_count}), skipping {token_address[:12]}")
+            return None
+
+        # No duplicate position for same token
+        existing = await session.execute(
+            select(Position).where(
+                Position.token_id == token_id,
+                Position.status == "open",
+                Position.is_paper == 1,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            logger.debug(f"[MICRO] Already have position for {token_address[:12]}, skipping")
+            return None
+
+        invest_sol = self._micro_snipe_sol
+
+        # Entry slippage
+        effective_price = price
+        if liquidity_usd and liquidity_usd > 0 and sol_price_usd and sol_price_usd > 0:
+            invest_usd = float(invest_sol) * sol_price_usd
+            if invest_usd > liquidity_usd * 0.02:
+                slippage_pct = min(invest_usd / liquidity_usd * 100, 50)
+                effective_price = price * Decimal(str(1.0 + slippage_pct / 100))
+
+        amount_token = invest_sol / effective_price if effective_price > 0 else Decimal("0")
+        _sym = symbol or token_address[:12]
+
+        trade = Trade(
+            signal_id=None,  # no signal yet — this is a prescan entry
+            token_id=token_id,
+            token_address=token_address,
+            side="buy",
+            amount_sol=invest_sol,
+            amount_token=amount_token,
+            price=effective_price,
+            is_paper=1,
+            status="filled",
+        )
+        session.add(trade)
+
+        position = Position(
+            signal_id=None,
+            token_id=token_id,
+            token_address=token_address,
+            symbol=_sym,
+            entry_price=effective_price,
+            current_price=price,
+            amount_token=amount_token,
+            amount_sol_invested=invest_sol,
+            pnl_pct=Decimal("0"),
+            pnl_usd=Decimal("0"),
+            max_price=price,
+            status="open",
+            is_paper=1,
+            is_micro_entry=1,
+        )
+        session.add(position)
+
+        try:
+            await session.flush()
+        except IntegrityError:
+            await session.rollback()
+            logger.debug(f"[MICRO] Duplicate position for {token_address[:12]}, skipping")
+            return None
+
+        logger.info(
+            f"[MICRO] Opened micro-snipe {token_address[:12]} "
+            f"@ {price} ({invest_sol} SOL)"
+        )
+
+        if self._alerts:
+            try:
+                await self._alerts.send_paper_open(
+                    symbol=_sym,
+                    address=token_address,
+                    price=float(price),
+                    sol_amount=float(invest_sol),
+                    action="micro_snipe",
+                )
+            except Exception as e:
+                logger.warning(f"[MICRO] Alert send failed: {e}")
+
+        return position
+
+    async def _topup_micro_position(
+        self,
+        session: AsyncSession,
+        position: Position,
+        signal: Signal,
+        price: Decimal,
+        liquidity_usd: float | None = None,
+        sol_price_usd: float | None = None,
+    ) -> Position:
+        """Phase 51: Top up a micro-snipe position to full size when signal confirms.
+
+        Calculates weighted average entry price from micro + additional investment.
+        Clears is_micro_entry flag.
+        """
+        # Full size = sol_per_trade * multiplier (same logic as on_signal)
+        size_multiplier = Decimal("1.5") if signal.status == "strong_buy" else Decimal("1.0")
+        full_size = self._sol_per_trade * size_multiplier
+
+        already_invested = position.amount_sol_invested or Decimal("0")
+        additional_sol = full_size - already_invested
+        if additional_sol <= 0:
+            # Already at or above full size (shouldn't happen, but safe guard)
+            position.is_micro_entry = 0
+            position.signal_id = signal.id
+            logger.info(f"[MICRO] Top-up skipped for {signal.token_address[:12]}: already full size")
+            return position
+
+        # Entry slippage on additional amount
+        effective_price = price
+        if liquidity_usd and liquidity_usd > 0 and sol_price_usd and sol_price_usd > 0:
+            invest_usd = float(additional_sol) * sol_price_usd
+            if invest_usd > liquidity_usd * 0.02:
+                slippage_pct = min(invest_usd / liquidity_usd * 100, 50)
+                effective_price = price * Decimal(str(1.0 + slippage_pct / 100))
+
+        additional_tokens = additional_sol / effective_price if effective_price > 0 else Decimal("0")
+
+        # Weighted average entry price
+        old_entry = position.entry_price or price
+        old_invest = already_invested
+        new_entry = (old_invest * old_entry + additional_sol * effective_price) / (old_invest + additional_sol)
+
+        # Update position
+        position.entry_price = new_entry
+        position.amount_sol_invested = old_invest + additional_sol
+        position.amount_token = (position.amount_token or Decimal("0")) + additional_tokens
+        position.signal_id = signal.id
+        position.is_micro_entry = 0  # No longer micro — fully invested
+
+        # Recalc PnL with new entry
+        if new_entry > 0:
+            position.pnl_pct = (price - new_entry) / new_entry * 100
+
+        # Create additional buy trade
+        trade = Trade(
+            signal_id=signal.id,
+            token_id=signal.token_id,
+            token_address=signal.token_address,
+            side="buy",
+            amount_sol=additional_sol,
+            amount_token=additional_tokens,
+            price=effective_price,
+            is_paper=1,
+            status="filled",
+        )
+        session.add(trade)
+
+        logger.info(
+            f"[MICRO] Top-up {signal.token_address[:12]} "
+            f"{signal.status}: +{additional_sol} SOL "
+            f"(total {position.amount_sol_invested} SOL, "
+            f"avg entry {new_entry:.12f})"
+        )
+
+        if self._alerts:
+            try:
+                await self._alerts.send_paper_open(
+                    symbol=position.symbol or signal.token_address[:12],
+                    address=signal.token_address,
+                    price=float(price),
+                    sol_amount=float(additional_sol),
+                    action="micro_topup",
+                )
+            except Exception as e:
+                logger.warning(f"[MICRO] Top-up alert failed: {e}")
 
         return position
 

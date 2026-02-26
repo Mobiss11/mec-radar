@@ -16,6 +16,7 @@ from src.parsers.enrichment_types import (
     EnrichmentStage,
     EnrichmentTask,
 )
+from src.parsers.birdeye.models import BirdeyeTokenOverview
 from src.parsers.jupiter.models import SellSimResult
 from src.parsers.mint_parser import MintInfo
 
@@ -86,6 +87,19 @@ def _task_to_dict(task: EnrichmentTask) -> dict:
             d["prescan_sell_sim"] = _serialize_value(raw)
         except Exception:
             d["prescan_sell_sim"] = None
+    # Phase 51: serialize Birdeye overview (Pydantic v2 model)
+    if task.prescan_birdeye_overview is not None:
+        try:
+            raw = (
+                task.prescan_birdeye_overview.model_dump()
+                if hasattr(task.prescan_birdeye_overview, "model_dump")
+                else task.prescan_birdeye_overview.__dict__
+                if hasattr(task.prescan_birdeye_overview, "__dict__")
+                else task.prescan_birdeye_overview
+            )
+            d["prescan_birdeye_overview"] = _serialize_value(raw)
+        except Exception:
+            d["prescan_birdeye_overview"] = None
     return d
 
 
@@ -106,6 +120,14 @@ def _dict_to_task(data: dict) -> EnrichmentTask:
     elif mint_info_raw is not None:
         mint_info = mint_info_raw
 
+    # Phase 51: reconstruct BirdeyeTokenOverview from dict if present
+    birdeye_raw = data.get("prescan_birdeye_overview")
+    birdeye_overview = None
+    if isinstance(birdeye_raw, dict):
+        birdeye_overview = BirdeyeTokenOverview(**birdeye_raw)
+    elif birdeye_raw is not None:
+        birdeye_overview = birdeye_raw
+
     return EnrichmentTask(
         priority=data["priority"],
         scheduled_at=data["scheduled_at"],
@@ -119,6 +141,7 @@ def _dict_to_task(data: dict) -> EnrichmentTask:
         prescan_risk_boost=data.get("prescan_risk_boost", 0),
         prescan_mint_info=mint_info,
         prescan_sell_sim=sell_sim,
+        prescan_birdeye_overview=birdeye_overview,
     )
 
 
