@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.signal import Signal
 from src.models.trade import Position, Trade
+from src.parsers.persistence import get_token_security_by_token_id
 from src.trading.close_conditions import check_close_conditions
 from src.trading.jupiter_swap import JupiterSwapClient, SwapResult, LAMPORTS_PER_SOL
 from src.trading.risk_manager import RiskManager, TradingCircuitBreaker
@@ -153,10 +154,28 @@ class RealTrader:
             logger.info(f"[REAL] Risk check blocked: {reason}")
             return None
 
+        # Phase 53: Historical rugcheck — block if token EVER had dangerous score.
+        # Prevents bypass where scammer manipulates rugcheck API to return low score
+        # after previously having dangerous score (e.g. RLT: 3501 → 1 → rug pull).
+        _db_security = await get_token_security_by_token_id(session, signal.token_id)
+        _db_rc_max = (
+            getattr(_db_security, "rugcheck_score_max", None)
+            if _db_security is not None
+            else None
+        )
+        # Fallback: if rugcheck_score_max not yet populated, use rugcheck_score
+        if _db_rc_max is None and _db_security is not None:
+            _db_rc_max = _db_security.rugcheck_score
+        if _db_rc_max is not None and _db_rc_max > 1000:
+            logger.warning(
+                f"[REAL] Historical rugcheck BLOCKED {signal.token_address[:12]}: "
+                f"rugcheck_score_max={_db_rc_max} > 1000"
+            )
+            return None
+
         # Rugcheck recheck — fresh API call right before buying.
-        # Production backtest: catches 4 scams where rugcheck score grew from
-        # 3501-11500 (at signal time) to 25000+ (seconds later).
-        # Saves $11.30 in losses with only $2.94 missed profits.
+        # Production: catches scams where rugcheck score grows between signal and buy.
+        # Phase 53: also blocks when recheck fails/returns None but DB has dangerous history.
         if self._rugcheck is not None:
             try:
                 recheck = await self._rugcheck.get_token_report(signal.token_address)
@@ -171,7 +190,7 @@ class RealTrader:
                 if recheck is not None:
                     logger.info(
                         f"[REAL] Rugcheck recheck OK for {signal.token_address[:12]}: "
-                        f"score={recheck.score}"
+                        f"score={recheck.score} (DB max={_db_rc_max})"
                     )
             except Exception as e:
                 # Non-fatal: if recheck fails, proceed with trade (don't block on API errors)

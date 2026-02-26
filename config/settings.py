@@ -130,11 +130,12 @@ class Settings(BaseSettings):
     real_stagnation_timeout_min: float = 25.0  # Phase 31B: close stagnating positions after 25 min
     real_stagnation_max_pnl_pct: float = 15.0  # Phase 31B: only close if PnL < 15%
     real_slippage_bps: int = 500  # 5%
-    real_min_liquidity_usd: float = 5000.0
+    real_min_liquidity_usd: float = 15000.0  # Phase 53: raised from $5K — thin pools are trivially rug-pullable
     real_priority_fee_lamports: int = 100000  # 0.0001 SOL
     real_max_sol_exposure: float = 0.8  # Max total SOL in open positions (2 × 0.375 strong_buy)
     real_circuit_breaker_threshold: int = 3  # Pause after N consecutive failures
     real_circuit_breaker_cooldown_sec: int = 1800  # 30 min cooldown
+    real_rugcheck_recheck_threshold: int = 15000  # Phase 53: rugcheck score above this blocks real trade
 
     # SolSniffer (paid plan — higher cap)
     enable_solsniffer: bool = True

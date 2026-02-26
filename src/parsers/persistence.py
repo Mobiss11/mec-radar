@@ -430,12 +430,19 @@ async def save_rugcheck_report(
         .values(
             token_id=token_id,
             rugcheck_score=report.score,
+            rugcheck_score_max=report.score,
             rugcheck_risks=risk_names,
         )
         .on_conflict_do_update(
             index_elements=["token_id"],
             set_={
                 "rugcheck_score": report.score,
+                # Phase 53: monotonic max — never decrease the worst-ever score.
+                # Prevents scammer manipulation where rugcheck API returns low score
+                # after previously returning dangerous score (e.g. 3501 → 1).
+                "rugcheck_score_max": func.greatest(
+                    TokenSecurity.rugcheck_score_max, report.score
+                ),
                 "rugcheck_risks": risk_names,
                 "checked_at": func.now(),
             },

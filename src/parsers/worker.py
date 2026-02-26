@@ -739,6 +739,7 @@ async def run_parser() -> None:
                     stagnation_max_pnl_pct=settings.real_stagnation_max_pnl_pct,
                     alert_dispatcher=alert_dispatcher,
                     rugcheck_client=rugcheck,
+                    rugcheck_recheck_threshold=settings.real_rugcheck_recheck_threshold,
                 )
                 logger.info(f"[REAL] Real trading enabled. Wallet: {wallet.pubkey_str}")
         except Exception as e:
@@ -3176,9 +3177,17 @@ async def _enrich_token(
 
         if snapshot is not None:
             security_data = await get_token_security_by_token_id(session, token.id)
-            # Read security for rugcheck_score if not yet fetched
-            if rugcheck_score_val is None and security_data and security_data.rugcheck_score is not None:
-                rugcheck_score_val = security_data.rugcheck_score
+            # Phase 53: Use max(rugcheck_score, rugcheck_score_max) from DB.
+            # Prevents bypass where scammer manipulates rugcheck API to return
+            # low score after previously having dangerous score (e.g. 3501 → 1).
+            if security_data:
+                _db_rc = security_data.rugcheck_score
+                _db_rc_max = getattr(security_data, "rugcheck_score_max", None)
+                _best_rc = max(filter(None, [_db_rc, _db_rc_max]), default=None)
+                if rugcheck_score_val is None and _best_rc is not None:
+                    rugcheck_score_val = _best_rc
+                elif rugcheck_score_val is not None and _best_rc is not None:
+                    rugcheck_score_val = max(rugcheck_score_val, _best_rc)
 
             dev_holds_val: float | None = None
             if security_data and security_data.dev_holds_pct is not None:

@@ -152,6 +152,7 @@ class TokenSecurity(Base):
     sell_tax: Mapped[Decimal | None] = mapped_column(Numeric)
     raw_data: Mapped[dict | None] = mapped_column(JSON)
     rugcheck_score: Mapped[int | None] = mapped_column(Integer)
+    rugcheck_score_max: Mapped[int | None] = mapped_column(Integer)  # Phase 53: monotonic max, never decreases
     rugcheck_risks: Mapped[str | None] = mapped_column(String(2000))
     # Phase 12 fields
     bundled_buy_detected: Mapped[bool | None] = mapped_column(Boolean)
