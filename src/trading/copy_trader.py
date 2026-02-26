@@ -356,16 +356,28 @@ class CopyTrader:
         invest_sol = min(swap.sol_amount * multiplier, max_sol)
         invest_sol = max(invest_sol, self._min_sol)
 
-        # Price from swap data
-        price = Decimal("0")
+        # Price from swap data (SOL per token → convert to USD)
+        # Helius gives native SOL amounts, but price loop uses Birdeye USD prices.
+        # We must store entry_price in USD to match current_price from price loop.
+        price_sol = Decimal("0")
         if swap.token_amount and swap.token_amount > 0:
-            price = swap.sol_amount / swap.token_amount
-        if price <= 0:
+            price_sol = swap.sol_amount / swap.token_amount
+        if price_sol <= 0:
             logger.warning(f"[COPY] Zero price for {swap.token_mint[:12]}, skipping")
             return None
 
-        # Calculate token amount for our position
-        amount_token = invest_sol / price if price > 0 else Decimal("0")
+        # Convert SOL price to USD
+        from src.parsers.sol_price import get_sol_price
+        sol_usd = get_sol_price()
+        if sol_usd and sol_usd > 0:
+            price = price_sol * Decimal(str(sol_usd))
+        else:
+            # Fallback: assume ~$150 SOL if price feed unavailable
+            price = price_sol * Decimal("150")
+            logger.debug(f"[COPY] SOL price unavailable, using $150 fallback")
+
+        # Calculate token amount for our position (use SOL price for amounts)
+        amount_token = invest_sol / price_sol if price_sol > 0 else Decimal("0")
 
         # TODO: For real mode, execute Jupiter buy swap here
         # For Phase 57 MVP, real mode creates paper-like records with is_paper=0
