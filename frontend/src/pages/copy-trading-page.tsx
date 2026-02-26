@@ -23,7 +23,123 @@ import {
   Copy,
   X,
   Loader2,
+  FileText,
+  Zap,
+  Trophy,
+  BarChart3,
 } from "lucide-react"
+
+/* ---------- Types ---------- */
+interface TrackedWallet {
+  address: string
+  label: string
+  multiplier: number
+  max_sol_per_trade: number
+  enabled: boolean
+  added_at: string
+  gmgn_rank: number | null
+  winrate_7d: number | null
+  pnl_7d_usd: number | null
+  twitter: string
+}
+
+interface SummaryData {
+  active_wallets: number
+  total_wallets: number
+  open_positions: number
+  total_invested_sol: number
+  closed_count: number
+  total_pnl_usd: number
+  win_rate: number
+  wins: number
+  losses: number
+  copy_trading_enabled: boolean
+  paper_mode: boolean
+  real_mode: boolean
+}
+
+/* ---------- Mode Toggle Switch ---------- */
+function ModeToggle({
+  label,
+  icon,
+  enabled,
+  onToggle,
+  colorClass,
+  description,
+}: {
+  label: string
+  icon: React.ReactNode
+  enabled: boolean
+  onToggle: () => void
+  colorClass: string
+  description: string
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      className={cn(
+        "flex items-center gap-3 rounded-xl border p-3 transition-all w-full text-left",
+        enabled
+          ? `border-${colorClass}/40 bg-${colorClass}/5`
+          : "border-border/50 bg-card/40 opacity-60",
+      )}
+      style={
+        enabled
+          ? {
+              borderColor: colorClass === "amber" ? "rgb(245 158 11 / 0.4)" : "rgb(16 185 129 / 0.4)",
+              backgroundColor: colorClass === "amber" ? "rgb(245 158 11 / 0.05)" : "rgb(16 185 129 / 0.05)",
+            }
+          : undefined
+      }
+    >
+      <div
+        className={cn(
+          "flex h-8 w-8 items-center justify-center rounded-lg",
+          enabled ? "bg-opacity-20" : "bg-muted/50",
+        )}
+        style={
+          enabled
+            ? {
+                backgroundColor: colorClass === "amber" ? "rgb(245 158 11 / 0.15)" : "rgb(16 185 129 / 0.15)",
+                color: colorClass === "amber" ? "rgb(245 158 11)" : "rgb(16 185 129)",
+              }
+            : undefined
+        }
+      >
+        {icon}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">{label}</span>
+          {enabled ? (
+            <span
+              className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold"
+              style={{
+                backgroundColor: colorClass === "amber" ? "rgb(245 158 11 / 0.15)" : "rgb(16 185 129 / 0.15)",
+                color: colorClass === "amber" ? "rgb(245 158 11)" : "rgb(16 185 129)",
+              }}
+            >
+              ON
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-full bg-muted/50 px-2 py-0.5 text-[10px] font-bold text-muted-foreground">
+              OFF
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-muted-foreground mt-0.5">{description}</p>
+      </div>
+      {enabled ? (
+        <ToggleRight
+          className="h-6 w-6 flex-shrink-0"
+          style={{ color: colorClass === "amber" ? "rgb(245 158 11)" : "rgb(16 185 129)" }}
+        />
+      ) : (
+        <ToggleLeft className="h-6 w-6 flex-shrink-0 text-muted-foreground" />
+      )}
+    </button>
+  )
+}
 
 /* ---------- Add Wallet Dialog ---------- */
 function AddWalletForm({
@@ -154,14 +270,7 @@ function WalletCard({
   onToggle,
   onRemove,
 }: {
-  wallet: {
-    address: string
-    label: string
-    multiplier: number
-    max_sol_per_trade: number
-    enabled: boolean
-    added_at: string
-  }
+  wallet: TrackedWallet
   onToggle: () => void
   onRemove: () => void
 }) {
@@ -187,6 +296,13 @@ function WalletCard({
         )}
       </button>
 
+      {/* GMGN Rank badge */}
+      {wallet.gmgn_rank != null && (
+        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-400">
+          <span className="text-[10px] font-bold">#{wallet.gmgn_rank}</span>
+        </div>
+      )}
+
       {/* Info */}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -210,10 +326,30 @@ function WalletCard({
             gmgn
             <ExternalLink className="h-2.5 w-2.5" />
           </a>
+          {wallet.twitter && (
+            <a
+              href={`https://x.com/${wallet.twitter}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-0.5 text-[10px] text-sky-400/60 hover:text-sky-400 transition-colors"
+            >
+              @{wallet.twitter}
+            </a>
+          )}
         </div>
         <div className="mt-0.5 flex gap-3 text-xs text-muted-foreground font-data">
-          <span>×{wallet.multiplier}</span>
+          <span>x{wallet.multiplier}</span>
           <span>Max: {wallet.max_sol_per_trade} SOL</span>
+          {wallet.winrate_7d != null && (
+            <span className="text-emerald-400/80">
+              WR: {wallet.winrate_7d.toFixed(1)}%
+            </span>
+          )}
+          {wallet.pnl_7d_usd != null && (
+            <span className="text-emerald-400/80">
+              PnL: ${Math.round(wallet.pnl_7d_usd / 1000)}K
+            </span>
+          )}
           <span>{timeAgo(wallet.added_at)}</span>
         </div>
       </div>
@@ -261,14 +397,16 @@ export function CopyTradingPage() {
   const [posStatus, setPosStatus] = useState("all")
   const [page, setPage] = useState(1)
   const [refreshKey, setRefreshKey] = useState(0)
+  const [togglingMode, setTogglingMode] = useState<string | null>(null)
   const { refreshCsrf } = useAuth()
 
   /* Polling: summary */
-  const { data: summary, loading: sumLoading } = usePolling({
+  const { data: summaryRaw, loading: sumLoading } = usePolling({
     fetcher: () => copyTrading.summary(),
     interval: 15000,
     key: `ct-summary-${refreshKey}`,
   })
+  const s = summaryRaw as SummaryData | null
 
   /* Polling: wallets */
   const { data: walletsData, loading: walletsLoading } = usePolling({
@@ -294,15 +432,7 @@ export function CopyTradingPage() {
     key: `ct-pos-${posStatus}-${page}-${refreshKey}`,
   })
 
-  const s = summary as Record<string, number | boolean> | null
-  const wallets = (walletsData?.items ?? []) as Array<{
-    address: string
-    label: string
-    multiplier: number
-    max_sol_per_trade: number
-    enabled: boolean
-    added_at: string
-  }>
+  const wallets = (walletsData?.items ?? []) as TrackedWallet[]
   const positions = (posData?.items ?? []) as Array<Record<string, unknown>>
 
   /* Handlers */
@@ -330,6 +460,19 @@ export function CopyTradingPage() {
     setRefreshKey((k) => k + 1)
   }
 
+  const handleToggleMode = async (mode: "paper_mode" | "real_mode") => {
+    if (togglingMode) return
+    setTogglingMode(mode)
+    try {
+      const token = await refreshCsrf()
+      const currentVal = s?.[mode] ?? false
+      await copyTrading.updateSettings({ [mode]: !currentVal }, token)
+      setRefreshKey((k) => k + 1)
+    } finally {
+      setTogglingMode(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -338,6 +481,26 @@ export function CopyTradingPage() {
         <p className="text-sm text-muted-foreground">
           Track whale wallets and mirror their trades automatically
         </p>
+      </div>
+
+      {/* Mode Toggles */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <ModeToggle
+          label="Paper Mode"
+          icon={<FileText className="h-4 w-4" />}
+          enabled={s?.paper_mode ?? true}
+          onToggle={() => handleToggleMode("paper_mode")}
+          colorClass="amber"
+          description="Simulate trades without real funds"
+        />
+        <ModeToggle
+          label="Real Mode"
+          icon={<Zap className="h-4 w-4" />}
+          enabled={s?.real_mode ?? false}
+          onToggle={() => handleToggleMode("real_mode")}
+          colorClass="emerald"
+          description="Execute real on-chain trades via Jupiter"
+        />
       </div>
 
       {/* Summary Cards */}
@@ -351,15 +514,15 @@ export function CopyTradingPage() {
         <StatCard
           label="Open Positions"
           value={s ? String(s.open_positions) : null}
-          trend={s ? `${formatSol(s.total_invested_sol as number)} invested` : undefined}
+          trend={s ? `${formatSol(s.total_invested_sol)} invested` : undefined}
           icon={<Wallet className="h-4 w-4" />}
           loading={sumLoading}
         />
         <StatCard
           label="Total PnL"
-          value={s ? formatUsd(s.total_pnl_usd as number) : null}
+          value={s ? formatUsd(s.total_pnl_usd) : null}
           icon={
-            s && (s.total_pnl_usd as number) >= 0 ? (
+            s && s.total_pnl_usd >= 0 ? (
               <TrendingUp className="h-4 w-4" />
             ) : (
               <TrendingDown className="h-4 w-4" />
@@ -384,7 +547,14 @@ export function CopyTradingPage() {
       {/* Tracked Wallets Section */}
       <div>
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-base font-semibold">Tracked Wallets</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-base font-semibold">Tracked Wallets</h3>
+            {wallets.length > 0 && (
+              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-bold text-primary">
+                {wallets.length}
+              </span>
+            )}
+          </div>
           {!showAddForm && (
             <Button
               size="sm"
@@ -492,6 +662,11 @@ export function CopyTradingPage() {
                     <span className="inline-flex items-center rounded-full bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-400">
                       copy
                     </span>
+                    {p.is_paper === true && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400">
+                        PAPER
+                      </span>
+                    )}
                     {p.is_paper === false && (
                       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />

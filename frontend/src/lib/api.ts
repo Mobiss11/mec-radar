@@ -192,7 +192,25 @@ export const copyTrading = {
       wins: number
       losses: number
       copy_trading_enabled: boolean
+      paper_mode: boolean
+      real_mode: boolean
     }>("/copy-trading/summary"),
+
+  settings: () =>
+    request<{ paper_mode: boolean; real_mode: boolean }>("/copy-trading/settings"),
+
+  updateSettings: (
+    data: { paper_mode?: boolean; real_mode?: boolean },
+    csrfToken: string,
+  ) =>
+    request<{ ok: boolean; paper_mode: boolean; real_mode: boolean }>(
+      "/copy-trading/settings",
+      {
+        method: "PATCH",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: JSON.stringify(data),
+      },
+    ),
 
   wallets: () =>
     request<{
@@ -203,6 +221,10 @@ export const copyTrading = {
         max_sol_per_trade: number
         enabled: boolean
         added_at: string
+        gmgn_rank: number | null
+        winrate_7d: number | null
+        pnl_7d_usd: number | null
+        twitter: string
       }>
       total: number
     }>("/copy-trading/wallets"),
@@ -214,6 +236,10 @@ export const copyTrading = {
       multiplier?: number
       max_sol_per_trade?: number
       enabled?: boolean
+      gmgn_rank?: number
+      winrate_7d?: number
+      pnl_7d_usd?: number
+      twitter?: string
     },
     csrfToken: string,
   ) =>
@@ -223,6 +249,29 @@ export const copyTrading = {
         method: "POST",
         headers: { "X-CSRF-Token": csrfToken },
         body: JSON.stringify(data),
+      },
+    ),
+
+  addWalletsBulk: (
+    wallets: Array<{
+      address: string
+      label?: string
+      multiplier?: number
+      max_sol_per_trade?: number
+      enabled?: boolean
+      gmgn_rank?: number
+      winrate_7d?: number
+      pnl_7d_usd?: number
+      twitter?: string
+    }>,
+    csrfToken: string,
+  ) =>
+    request<{ ok: boolean; added: number; skipped: number; total_wallets: number }>(
+      "/copy-trading/wallets/bulk",
+      {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ wallets }),
       },
     ),
 

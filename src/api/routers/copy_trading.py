@@ -1,14 +1,18 @@
-"""Copy Trading endpoints — wallet management, stats, and trade history.
+"""Copy Trading endpoints — wallet management, stats, settings, and trade history.
 
 Phase 55: Copy trading dashboard — manage tracked wallets and monitor
 copy-trade performance. Backend stores wallet list in settings/DB,
 gRPC monitors wallet transactions, CopyTrader executes via Jupiter.
+
+Phase 56: Paper/Real mode toggles, GMGN leaderboard wallet presets,
+per-wallet gmgn_rank/winrate/pnl metadata.
 """
 
 from __future__ import annotations
 
 import html
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -37,6 +41,11 @@ class AddWalletRequest(BaseModel):
     multiplier: float = Field(default=1.0, ge=0.01, le=100.0)
     max_sol_per_trade: float = Field(default=0.05, ge=0.001, le=10.0)
     enabled: bool = True
+    # GMGN metadata (optional, populated from leaderboard)
+    gmgn_rank: int | None = Field(default=None, ge=1, le=1000)
+    winrate_7d: float | None = Field(default=None, ge=0, le=100)
+    pnl_7d_usd: float | None = Field(default=None)
+    twitter: str | None = Field(default=None, max_length=64)
 
 
 class UpdateWalletRequest(BaseModel):
@@ -47,20 +56,78 @@ class UpdateWalletRequest(BaseModel):
     enabled: bool | None = None
 
 
+class UpdateSettingsRequest(BaseModel):
+    """Update copy trading mode settings."""
+    paper_mode: bool | None = None
+    real_mode: bool | None = None
+
+
 # ---------------------------------------------------------------------------
-# In-memory wallet store (persisted via settings API later)
-# In production, this would be a DB table. For MVP, we use a module-level dict
-# that the worker process can also access via import.
+# In-memory wallet store + settings
 # ---------------------------------------------------------------------------
 
 _tracked_wallets: dict[str, dict[str, Any]] = {}
 # Format: { "7xK...abc": { "label": "Whale1", "multiplier": 1.0,
-#            "max_sol_per_trade": 0.05, "enabled": True, "added_at": "..." } }
+#            "max_sol_per_trade": 0.05, "enabled": True, "added_at": "...",
+#            "gmgn_rank": 4, "winrate_7d": 93.7, "pnl_7d_usd": 57902, "twitter": "" } }
+
+_copy_settings: dict[str, Any] = {
+    "paper_mode": True,   # Paper trading ON by default
+    "real_mode": False,    # Real trading OFF by default (safety)
+}
+
+# ---------------------------------------------------------------------------
+# GMGN Leaderboard Presets (7D top traders, 2026-02-26)
+# Criteria: WR >= 70%, PnL >= $20K/7d, tracked < 1000, loss50+ <= 5
+# ---------------------------------------------------------------------------
+_GMGN_PRESETS: list[dict[str, Any]] = [
+    {"address": "A3WySdFfsNLNyRQABzfV5wAo1Y9fo2Kgrmuug7fTfBxL", "label": "GMGN#4 WR93.7%", "gmgn_rank": 4, "winrate_7d": 93.7, "pnl_7d_usd": 57902, "twitter": ""},
+    {"address": "Dzp1SrZ474xwGp6ZEP6cNKo39u9zeXe1YAuTkyZyv3t4", "label": "GMGN#33 WR98.5%", "gmgn_rank": 33, "winrate_7d": 98.5, "pnl_7d_usd": 29655, "twitter": ""},
+    {"address": "FSYojWVXvrXNkFfvCAptVhpnWHuJoNzQNu7QSgsecCEz", "label": "GMGN#38 WR98.6%", "gmgn_rank": 38, "winrate_7d": 98.6, "pnl_7d_usd": 27834, "twitter": ""},
+    {"address": "HiSo5kykqDPs3EG14Fk9QY4B5RvkuEs8oJTiqPX3EDAn", "label": "GMGN#46 WR90.3%", "gmgn_rank": 46, "winrate_7d": 90.3, "pnl_7d_usd": 24862, "twitter": ""},
+    {"address": "9g7QpJvPvMULB3n6tQMjbzbNoDDhMKpVoJJDvoECXViG", "label": "GMGN#32 WR84.5%", "gmgn_rank": 32, "winrate_7d": 84.5, "pnl_7d_usd": 30690, "twitter": ""},
+    {"address": "FqmXjEGnLx38pd9ZxDJcEuNNZNngrvXYNPsFw8XvgTeb", "label": "GMGN#12 WR81%", "gmgn_rank": 12, "winrate_7d": 81.0, "pnl_7d_usd": 46580, "twitter": ""},
+    {"address": "843VNwYH83tgpBfrZxkxQQWfQ8CRdsLBmzhcT4JGjHBs", "label": "Alan Sousa", "gmgn_rank": 8, "winrate_7d": 75.5, "pnl_7d_usd": 50529, "twitter": "allaanll"},
+    {"address": "8oEdL8WBRpE3C63FeqZ7hwSH8fjh715ZvkgmMLhDneGm", "label": "GMGN#6 WR75.6%", "gmgn_rank": 6, "winrate_7d": 75.6, "pnl_7d_usd": 52488, "twitter": ""},
+    {"address": "7kGAXsa7n1qN2FuNoJAGmzebmN9KqqLAHcwj7gvoekKk", "label": "GMGN#54 WR81.5%", "gmgn_rank": 54, "winrate_7d": 81.5, "pnl_7d_usd": 19863, "twitter": ""},
+    {"address": "2oUG1MwkQc6yoURyvDxzCyDn2aGvoJLGjzZSKsK3ULbQ", "label": "GMGN#34 WR78.3%", "gmgn_rank": 34, "winrate_7d": 78.3, "pnl_7d_usd": 28778, "twitter": ""},
+    {"address": "GUgMNi2tJcjYpDSFs2VZQpjryeWRG4Xgmi1JPDEoe1TH", "label": "GMGN#39 WR78.1%", "gmgn_rank": 39, "winrate_7d": 78.1, "pnl_7d_usd": 26973, "twitter": ""},
+    {"address": "8ghYW6ftL5kUemfsoA9X37rz3ZnvyMSZRAx1kt1CxpoS", "label": "GMGN#22 WR71.9%", "gmgn_rank": 22, "winrate_7d": 71.9, "pnl_7d_usd": 36538, "twitter": ""},
+    {"address": "5ATd36Tdq6zrtHBokC5moRs9Y5EFSNaZQ12fzRmTeNWd", "label": "GMGN#41 WR73.8%", "gmgn_rank": 41, "winrate_7d": 73.8, "pnl_7d_usd": 25704, "twitter": ""},
+    {"address": "FFEjC9MHhpQViBPrD2iU6LmV2hEigyhLJaL7MZUZzyD4", "label": "GMGN#57 WR70.2%", "gmgn_rank": 57, "winrate_7d": 70.2, "pnl_7d_usd": 20143, "twitter": ""},
+]
+
+
+def _load_presets() -> None:
+    """Load GMGN leaderboard presets into tracked wallets on startup."""
+    for preset in _GMGN_PRESETS:
+        addr = preset["address"]
+        if addr not in _tracked_wallets:
+            _tracked_wallets[addr] = {
+                "label": preset["label"],
+                "multiplier": 1.0,
+                "max_sol_per_trade": 0.05,
+                "enabled": True,
+                "added_at": datetime.now(timezone.utc).isoformat(),
+                "gmgn_rank": preset.get("gmgn_rank"),
+                "winrate_7d": preset.get("winrate_7d"),
+                "pnl_7d_usd": preset.get("pnl_7d_usd"),
+                "twitter": preset.get("twitter", ""),
+            }
+
+
+# Auto-load presets on module import
+_load_presets()
 
 
 def get_tracked_wallets() -> dict[str, dict[str, Any]]:
     """Accessor for worker process to read tracked wallets."""
     return _tracked_wallets
+
+
+def get_copy_settings() -> dict[str, Any]:
+    """Accessor for worker process to read copy trading settings."""
+    return _copy_settings
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +185,45 @@ async def copy_trading_summary(
         "wins": wins,
         "losses": losses,
         "copy_trading_enabled": bool(_tracked_wallets),
+        "paper_mode": _copy_settings["paper_mode"],
+        "real_mode": _copy_settings["real_mode"],
+    }
+
+
+@router.get("/settings")
+async def get_settings(
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Get copy trading mode settings."""
+    return {
+        "paper_mode": _copy_settings["paper_mode"],
+        "real_mode": _copy_settings["real_mode"],
+    }
+
+
+@router.patch("/settings")
+async def update_settings(
+    body: UpdateSettingsRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Update copy trading mode settings (paper/real toggles). Requires CSRF."""
+    csrf_token = request.headers.get("X-CSRF-Token", "")
+    if not verify_csrf_token(csrf_token, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid CSRF token",
+        )
+
+    if body.paper_mode is not None:
+        _copy_settings["paper_mode"] = body.paper_mode
+    if body.real_mode is not None:
+        _copy_settings["real_mode"] = body.real_mode
+
+    return {
+        "ok": True,
+        "paper_mode": _copy_settings["paper_mode"],
+        "real_mode": _copy_settings["real_mode"],
     }
 
 
@@ -135,6 +241,10 @@ async def list_wallets(
             "max_sol_per_trade": config.get("max_sol_per_trade", 0.05),
             "enabled": config.get("enabled", True),
             "added_at": config.get("added_at", ""),
+            "gmgn_rank": config.get("gmgn_rank"),
+            "winrate_7d": config.get("winrate_7d"),
+            "pnl_7d_usd": config.get("pnl_7d_usd"),
+            "twitter": config.get("twitter", ""),
         })
     return {"items": items, "total": len(items)}
 
@@ -166,17 +276,72 @@ async def add_wallet(
             detail="Wallet already tracked",
         )
 
-    from datetime import datetime, timezone
-
     _tracked_wallets[addr] = {
         "label": html.escape(body.label.strip()) if body.label else "",
         "multiplier": body.multiplier,
         "max_sol_per_trade": body.max_sol_per_trade,
         "enabled": body.enabled,
         "added_at": datetime.now(timezone.utc).isoformat(),
+        "gmgn_rank": body.gmgn_rank,
+        "winrate_7d": body.winrate_7d,
+        "pnl_7d_usd": body.pnl_7d_usd,
+        "twitter": body.twitter or "",
     }
 
     return {"ok": True, "address": addr, "total_wallets": len(_tracked_wallets)}
+
+
+@router.post("/wallets/bulk")
+async def add_wallets_bulk(
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Bulk-add wallets from GMGN leaderboard data. Requires CSRF."""
+    csrf_token = request.headers.get("X-CSRF-Token", "")
+    if not verify_csrf_token(csrf_token, user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid CSRF token",
+        )
+
+    body = await request.json()
+    wallets_data: list[dict[str, Any]] = body.get("wallets", [])
+    if not wallets_data or len(wallets_data) > 50:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide 1-50 wallets",
+        )
+
+    added = 0
+    skipped = 0
+    for w in wallets_data:
+        addr = str(w.get("address", "")).strip()
+        if not _SOL_ADDR_RE.match(addr):
+            skipped += 1
+            continue
+        if addr in _tracked_wallets:
+            skipped += 1
+            continue
+
+        _tracked_wallets[addr] = {
+            "label": html.escape(str(w.get("label", ""))[:64]),
+            "multiplier": min(max(float(w.get("multiplier", 1.0)), 0.01), 100.0),
+            "max_sol_per_trade": min(max(float(w.get("max_sol_per_trade", 0.05)), 0.001), 10.0),
+            "enabled": bool(w.get("enabled", True)),
+            "added_at": datetime.now(timezone.utc).isoformat(),
+            "gmgn_rank": w.get("gmgn_rank"),
+            "winrate_7d": w.get("winrate_7d"),
+            "pnl_7d_usd": w.get("pnl_7d_usd"),
+            "twitter": str(w.get("twitter", ""))[:64],
+        }
+        added += 1
+
+    return {
+        "ok": True,
+        "added": added,
+        "skipped": skipped,
+        "total_wallets": len(_tracked_wallets),
+    }
 
 
 @router.patch("/wallets/{address}")
