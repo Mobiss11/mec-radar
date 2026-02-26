@@ -138,8 +138,9 @@ class TestPhase12ScoringV3:
 
     def test_combined_penalties_floor_at_zero(self) -> None:
         """Multiple penalties should floor at 0, not go negative."""
+        # Use very low liquidity + holders to ensure penalties dominate
         score = compute_score(
-            _make_snapshot(liquidity_usd=Decimal("5000"), holders_count=10),
+            _make_snapshot(liquidity_usd=Decimal("1000"), holders_count=2),
             _make_security(),
             sell_sim_failed=True,
             bundled_buy_detected=True,

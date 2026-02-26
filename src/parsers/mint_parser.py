@@ -111,6 +111,9 @@ async def parse_mint_account(rpc_url: str, mint_address: str) -> MintInfo:
     Returns MintInfo with parsed fields. On error, returns MintInfo
     with parse_error set.
     """
+    # Phase 54: Defensive — ensure rpc_url is str (bytes from Redis serialization)
+    if isinstance(rpc_url, bytes):
+        rpc_url = rpc_url.decode("utf-8")
     payload = {
         "jsonrpc": "2.0",
         "id": 1,

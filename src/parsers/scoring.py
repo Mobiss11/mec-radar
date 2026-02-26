@@ -117,6 +117,8 @@ def compute_score(
         score += 20
     elif liquidity >= 10_000:
         score += 15
+    elif liquidity >= 5_000:
+        score += 8  # Phase 49: pump.fun bonding curve tokens start at $5-8K
 
     # --- Holders (0-20 pts) ---
     if holders >= 500:
@@ -127,8 +129,10 @@ def compute_score(
         score += 12
     elif holders >= 50:
         score += 8
-    elif holders > 20:
+    elif holders >= 20:
         score += 5
+    elif holders >= 5:
+        score += 2  # Phase 49: early pump.fun tokens have 5-20 holders at T+8s
 
     # --- Volume/Liquidity ratio (0-25 pts) ---
     volume = _best_volume(snapshot)
@@ -279,14 +283,15 @@ def compute_score(
         elif volatility_5m < 3:
             score += 2  # consolidating = healthy
 
-    # --- Rugcheck penalty (-15 to +5 pts) [Phase 11] ---
+    # --- Rugcheck penalty (-15 pts) [Phase 11 + Phase 54] ---
     if rugcheck_score is not None:
         if rugcheck_score >= 50:
             score -= 15
         elif rugcheck_score >= 30:
             score -= 8
-        elif rugcheck_score < 10:
-            score += 5
+        # Phase 54: removed +5 bonus for rc<10.
+        # rc=1 means "unanalyzed" (Token-2022), NOT "clean".
+        # All pump.fun Token-2022 tokens have rc=1 — both scams and profitable.
 
     # --- 24h sustained interest (-5 to +3 pts) [Phase 11] ---
     b24 = snapshot.buys_24h
@@ -427,18 +432,21 @@ def compute_score(
         elif tg_member_count >= 200:
             score += 1
 
-    # --- Phase 16: LLM risk assessment (-5 to +3 pts) ---
+    # --- Phase 16: LLM risk assessment (-2 to +3 pts) ---
+    # Phase 49: reduced penalty — LLM gives 80-90 for 99% of fresh memecoins (noise)
     if llm_risk_score is not None:
         if llm_risk_score >= 80:
-            score -= 5  # LLM says high risk
+            score -= 2  # was -5 — too punishing for fresh tokens
         elif llm_risk_score >= 50:
-            score -= 2
+            score -= 1  # was -2
         elif llm_risk_score <= 20:
             score += 3  # LLM says low risk
 
     # --- Data completeness cap ---
     # Tokens with very sparse data shouldn't get high scores — require at least
-    # 3 of 6 core metrics to avoid false positives from incomplete enrichment.
+    # 3 of 8 core metrics to avoid false positives from incomplete enrichment.
+    # Phase 49: added volume_5m and buys_5m as valid data signals —
+    # pump.fun tokens at T+8s have these but not volume_1h/top10/smart_wallets.
     _available = sum([
         snapshot.liquidity_usd is not None or snapshot.dex_liquidity_usd is not None,
         snapshot.holders_count is not None,
@@ -446,6 +454,8 @@ def compute_score(
         security is not None,
         snapshot.smart_wallets_count is not None,
         snapshot.top10_holders_pct is not None,
+        snapshot.volume_5m is not None or snapshot.dex_volume_5m is not None,
+        snapshot.buys_5m is not None and snapshot.buys_5m > 0,
     ])
     if _available < 3:
         score = min(score, 40)

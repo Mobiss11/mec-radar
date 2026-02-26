@@ -1399,6 +1399,12 @@ async def _run_prescan(
     if goplus_report and goplus_report.is_honeypot is True:
         reject_reasons.append("goplus_honeypot")
 
+    # Phase 54: Log parse_error for monitoring (Token-2022 extension detection)
+    if mint_info and mint_info.parse_error:
+        logger.info(
+            f"[PRE_SCAN] {mint[:12]} mint parse_error: {mint_info.parse_error}"
+        )
+
     if reject_reasons:
         logger.info(
             f"[PRE_SCAN] {mint[:12]} REJECTED: {', '.join(reject_reasons)}"

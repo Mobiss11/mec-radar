@@ -109,7 +109,7 @@ def compute_score_v3(
     elif liquidity >= 10_000:
         score += 8
     elif liquidity >= 5_000:
-        score += 4
+        score += 5  # Phase 49: pump.fun bonding curve (was 4)
 
     # --- Momentum (0-35 pts) ---
     # Buy pressure (0-15 pts)
@@ -184,6 +184,8 @@ def compute_score_v3(
         score += 7
     elif holders >= 50:
         score += 4
+    elif holders >= 10:
+        score += 2  # Phase 49: early pump.fun tokens
 
     # --- Security gate (-30 to +10 pts) ---
     if security is not None:
@@ -280,14 +282,13 @@ def compute_score_v3(
         elif volatility_5m < 3:
             score += 2
 
-    # --- Rugcheck penalty (-20 to +5 pts) [Phase 11] ---
+    # --- Rugcheck penalty (-20 pts) [Phase 11 + Phase 54] ---
     if rugcheck_score is not None:
         if rugcheck_score >= 50:
             score -= 20
         elif rugcheck_score >= 30:
             score -= 10
-        elif rugcheck_score < 10:
-            score += 5
+        # Phase 54: removed +5 bonus for rc<10 (see scoring.py)
 
     # --- 24h sustained interest (-5 to +3 pts) [Phase 11] ---
     b24 = snapshot.buys_24h
@@ -424,16 +425,18 @@ def compute_score_v3(
         elif tg_member_count >= 200:
             score += 1
 
-    # --- Phase 16: LLM risk assessment (-5 to +3 pts) ---
+    # --- Phase 16: LLM risk assessment (-2 to +3 pts) ---
+    # Phase 49: reduced penalty — LLM gives 80-90 for 99% of fresh memecoins (noise)
     if llm_risk_score is not None:
         if llm_risk_score >= 80:
-            score -= 5
+            score -= 2  # was -5
         elif llm_risk_score >= 50:
-            score -= 2
+            score -= 1  # was -2
         elif llm_risk_score <= 20:
             score += 3
 
     # --- Data completeness cap ---
+    # Phase 49: expanded from 6 to 8 metrics — volume_5m and buys_5m available at INITIAL
     _available = sum([
         snapshot.liquidity_usd is not None or snapshot.dex_liquidity_usd is not None,
         snapshot.holders_count is not None,
@@ -441,6 +444,8 @@ def compute_score_v3(
         security is not None,
         snapshot.smart_wallets_count is not None,
         snapshot.top10_holders_pct is not None,
+        snapshot.volume_5m is not None or snapshot.dex_volume_5m is not None,
+        snapshot.buys_5m is not None and snapshot.buys_5m > 0,
     ])
     if _available < 3:
         score = min(score, 40)

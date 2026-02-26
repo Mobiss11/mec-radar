@@ -61,11 +61,14 @@ def test_rugcheck_dangerous_penalty():
     assert base - with_rug == 20
 
 
-def test_rugcheck_clean_bonus():
-    """rugcheck_score < 10 gives +5 bonus in v3."""
+def test_rugcheck_low_rc_neutral():
+    """Phase 54: rugcheck_score < 10 gives NO bonus in v3 (neutral 0).
+
+    rc=1 means 'unanalyzed' (Token-2022), NOT 'clean'.
+    """
     base = compute_score_v3(_snap(), _sec())
-    with_clean = compute_score_v3(_snap(), _sec(), rugcheck_score=5)
-    assert with_clean - base == 5
+    with_low_rc = compute_score_v3(_snap(), _sec(), rugcheck_score=5)
+    assert with_low_rc - base == 0  # neutral, no bonus
 
 
 def test_smart_money_weighted():

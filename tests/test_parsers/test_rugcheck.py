@@ -73,15 +73,19 @@ def test_rugcheck_scoring_penalty_dangerous():
         contract_renounced=True, sell_tax=Decimal("0"),
         top10_holders_pct=Decimal("20"), is_mintable=False,
     )
-    score_clean = compute_score(snap, sec, rugcheck_score=5)
+    score_neutral = compute_score(snap, sec, rugcheck_score=5)
     score_danger = compute_score(snap, sec, rugcheck_score=60)
-    # Clean gets +5, dangerous gets -15 => diff = 20
-    assert score_clean > score_danger
-    assert score_clean - score_danger == 20
+    # Phase 54: rc<10 is neutral (0), dangerous gets -15 => diff = 15
+    assert score_neutral > score_danger
+    assert score_neutral - score_danger == 15
 
 
-def test_rugcheck_scoring_bonus_clean():
-    """Rugcheck score < 10 gives +5 bonus."""
+def test_rugcheck_scoring_neutral_for_low_rc():
+    """Phase 54: Rugcheck score < 10 gives NO bonus (neutral 0, not +5).
+
+    rc=1 means "unanalyzed" (Token-2022), NOT "clean".
+    All pump.fun Token-2022 tokens have rc=1 — both scams and profitable.
+    """
     from decimal import Decimal
 
     from src.models.token import TokenSecurity, TokenSnapshot
@@ -99,8 +103,9 @@ def test_rugcheck_scoring_bonus_clean():
         top10_holders_pct=Decimal("20"), is_mintable=False,
     )
     score_no_rugcheck = compute_score(snap, sec)
-    score_clean = compute_score(snap, sec, rugcheck_score=5)
-    assert score_clean == score_no_rugcheck + 5
+    score_low_rc = compute_score(snap, sec, rugcheck_score=5)
+    # Phase 54: rc<10 is neutral — same score as no rugcheck data
+    assert score_low_rc == score_no_rugcheck
 
 
 def test_rugcheck_report_empty_risks():
