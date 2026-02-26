@@ -196,28 +196,33 @@ class CopyTrader:
             logger.warning(f"[COPY] Helius returned empty after 3 attempts for {sig_short}")
             return
 
-        # 4. Validate: must be SWAP, no error, fee_payer matches wallet
-        if tx.type != "SWAP":
+        # 4. Validate: check for errors and fee_payer match
+        # NOTE: Don't filter by tx.type — pump.fun buys come as TRANSFER/CREATE/UNKNOWN.
+        # Instead we let _parse_swap detect SOL↔token flow regardless of Helius type.
+        _skip_types = {"COMPRESSED_NFT_MINT", "NFT_MINT", "NFT_LISTING", "NFT_SALE",
+                       "NFT_BID", "NFT_CANCEL_LISTING", "STAKE_SOL", "UNSTAKE_SOL"}
+        if tx.type in _skip_types:
             self._skipped_non_swap += 1
-            logger.info(
-                f"[COPY] Not SWAP: type={tx.type} source={getattr(tx, 'source', '?')} "
-                f"sig={sig_short}"
-            )
+            logger.debug(f"[COPY] Skip type={tx.type}: {sig_short}")
             return
         if tx.transaction_error:
-            logger.info(f"[COPY] TX error: {sig_short}")
+            logger.debug(f"[COPY] TX error: {sig_short}")
             return
         if tx.fee_payer != wallet_address:
-            logger.info(
+            logger.debug(
                 f"[COPY] Fee payer mismatch: expected={wallet_short} "
                 f"got={tx.fee_payer[:12] if tx.fee_payer else 'None'}"
             )
             return
 
-        # 5. Parse swap details
+        # 5. Parse swap details (works for SWAP, TRANSFER, CREATE, UNKNOWN — any tx with SOL↔token flow)
         swap = self._parse_swap(wallet_address, config, tx)
         if not swap:
-            logger.info(f"[COPY] Parse failed (no SOL flow or min_sol): {sig_short}")
+            logger.debug(
+                f"[COPY] No swap flow: type={tx.type} source={getattr(tx, 'source', '?')} "
+                f"native={len(tx.native_transfers)} tokens={len(tx.token_transfers)} "
+                f"sig={sig_short}"
+            )
             return
 
         self._swaps_parsed += 1
@@ -240,23 +245,42 @@ class CopyTrader:
         config: dict[str, Any],
         tx: Any,
     ) -> CopySwap | None:
-        """Parse a Helius SWAP transaction into a CopySwap event.
+        """Parse any transaction into a CopySwap event if it has SOL↔token flow.
+
+        Detects buys/sells regardless of Helius type (SWAP, TRANSFER, CREATE, UNKNOWN).
+        Handles both native SOL and wrapped SOL (WSOL) transfers.
 
         BUY: wallet sends SOL → receives token
         SELL: wallet sends token → receives SOL
         """
-        # Collect SOL outflows (wallet spending SOL = buy)
+        # Collect SOL outflows from native transfers (wallet spending SOL)
         sol_out = sum(
             t.amount
             for t in tx.native_transfers
             if t.from_user_account == wallet_address
         )
-        # Collect SOL inflows (wallet receiving SOL = sell)
+        # Collect SOL inflows from native transfers (wallet receiving SOL)
         sol_in = sum(
             t.amount
             for t in tx.native_transfers
             if t.to_user_account == wallet_address
         )
+
+        # Also check WSOL (wrapped SOL) in token_transfers — pump.fun uses this
+        wsol_out = sum(
+            int(t.token_amount * Decimal(10**9)) if t.token_amount else 0
+            for t in tx.token_transfers
+            if t.from_user_account == wallet_address and t.mint == SOL_MINT
+        )
+        wsol_in = sum(
+            int(t.token_amount * Decimal(10**9)) if t.token_amount else 0
+            for t in tx.token_transfers
+            if t.to_user_account == wallet_address and t.mint == SOL_MINT
+        )
+
+        # Combine native + wrapped SOL
+        total_sol_out = sol_out + wsol_out
+        total_sol_in = sol_in + wsol_in
 
         # Non-SOL tokens received by wallet (= bought)
         tokens_received = [
@@ -272,9 +296,9 @@ class CopyTrader:
         label = config.get("label", wallet_address[:12])
 
         # BUY: SOL out > fee AND received token
-        if sol_out > tx.fee and tokens_received:
+        if total_sol_out > tx.fee and tokens_received:
             token = tokens_received[0]
-            sol_amount = Decimal(sol_out - tx.fee) / Decimal(10**9)
+            sol_amount = Decimal(total_sol_out - tx.fee) / Decimal(10**9)
             if sol_amount < self._min_sol:
                 return None
             return CopySwap(
@@ -291,7 +315,7 @@ class CopyTrader:
             )
 
         # SELL: tokens sent AND SOL received (beyond fee refund)
-        net_sol_in = sol_in - max(sol_out, 0)
+        net_sol_in = total_sol_in - max(total_sol_out, 0)
         if tokens_sent and net_sol_in > 0:
             token = tokens_sent[0]
             sol_amount = Decimal(net_sol_in) / Decimal(10**9)
