@@ -42,13 +42,15 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 STABLECOIN_MINTS: set[str] = {
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
-    "USD1ZWsSqMGsCTmgg2LpPC6FicSfYaBobB4V8jXbpump",  # USD1
+    "USD1ZWsSqMGsCTmgg2LpPC6FicSfYaBobB4V8jXbpump",  # USD1 (pump.fun)
+    "USD1ttGY1N17NEEHLmELoaybftRBUSErhqYiQzvEmuB",  # USD1 (Usual Money)
     "USDSwr9AiSQKFJGBmPsLRMqqYhUBbxhqzHgoK2PAMHP",  # USDS
     "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",   # USDH
     "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj",  # stSOL
     "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",   # mSOL
     "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1",   # bSOL
     "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn",  # jitoSOL
+    "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT",  # UXD
 }
 
 
